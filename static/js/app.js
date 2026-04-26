@@ -1,0 +1,578 @@
+const elements = {
+  analyzeButton: document.querySelector("#analyze-button"),
+  classNames: document.querySelector("#class-names"),
+  exportReportButton: document.querySelector("#export-report-button"),
+  fileList: document.querySelector("#file-list"),
+  heroHealth: document.querySelector("#hero-health"),
+  heroTaskType: document.querySelector("#hero-task-type"),
+  imageInput: document.querySelector("#image-input"),
+  inventoryHint: document.querySelector("#inventory-hint"),
+  issueHint: document.querySelector("#issue-hint"),
+  issueList: document.querySelector("#issue-list"),
+  labelInput: document.querySelector("#label-input"),
+  metricImages: document.querySelector("#metric-images"),
+  metricIssues: document.querySelector("#metric-issues"),
+  metricLabels: document.querySelector("#metric-labels"),
+  metricPairs: document.querySelector("#metric-pairs"),
+  previewCanvas: document.querySelector("#preview-canvas"),
+  previewImageMeta: document.querySelector("#preview-image-meta"),
+  previewLabelMeta: document.querySelector("#preview-label-meta"),
+  previewName: document.querySelector("#preview-name"),
+  statusLine: document.querySelector("#status-line"),
+  taskType: document.querySelector("#task-type"),
+};
+
+const state = {
+  datasetEntries: [],
+  imageFiles: [],
+  issues: [],
+  labelFiles: [],
+  previewImage: null,
+  selectedEntryKey: null,
+  taskType: "detect",
+};
+
+function setStatus(message, type = "info") {
+  elements.statusLine.textContent = message;
+  elements.heroHealth.textContent = type === "error" ? "Blocked" : type === "warn" ? "Needs review" : "Ready";
+}
+
+function normalizeBaseName(filename) {
+  return String(filename || "").replace(/\.[^.]+$/, "").trim().toLowerCase();
+}
+
+function parseClassNames() {
+  return elements.classNames.value
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function createIssue(level, code, message, entryKey = null, line = null) {
+  return { level, code, message, entryKey, line };
+}
+
+function getIssueWeight(level) {
+  return level === "error" ? 2 : 1;
+}
+
+async function loadImageInfo(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      resolve({ url, width: image.naturalWidth, height: image.naturalHeight });
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error(`Failed to load image: ${file.name}`));
+    };
+    image.src = url;
+  });
+}
+
+function parseDetectLine(parts, classNamesLength, lineNumber) {
+  if (parts.length !== 5) {
+    return {
+      issue: createIssue("error", "detect_format", "Detect label must contain 5 values.", null, lineNumber),
+    };
+  }
+
+  const classId = Number(parts[0]);
+  const xCenter = Number(parts[1]);
+  const yCenter = Number(parts[2]);
+  const width = Number(parts[3]);
+  const height = Number(parts[4]);
+  const numericValues = [classId, xCenter, yCenter, width, height];
+
+  if (numericValues.some((value) => !Number.isFinite(value))) {
+    return {
+      issue: createIssue("error", "detect_nan", "Detect label contains non-numeric values.", null, lineNumber),
+    };
+  }
+
+  if (!Number.isInteger(classId) || classId < 0) {
+    return {
+      issue: createIssue("error", "class_id", "Class id must be a non-negative integer.", null, lineNumber),
+    };
+  }
+
+  if (classNamesLength > 0 && classId >= classNamesLength) {
+    return {
+      issue: createIssue("error", "class_range", "Class id is outside the configured class list.", null, lineNumber),
+    };
+  }
+
+  const normalizedValues = [xCenter, yCenter, width, height];
+  if (normalizedValues.some((value) => value < 0 || value > 1)) {
+    return {
+      issue: createIssue("error", "normalized_range", "Detect coordinates must stay within 0..1.", null, lineNumber),
+    };
+  }
+
+  return {
+    record: { type: "detect", classId, xCenter, yCenter, width, height },
+  };
+}
+
+function parseSegmentLine(parts, classNamesLength, lineNumber) {
+  if (parts.length < 7 || parts.length % 2 === 0) {
+    return {
+      issue: createIssue("error", "segment_format", "Segment label needs class id plus point pairs.", null, lineNumber),
+    };
+  }
+
+  const classId = Number(parts[0]);
+  if (!Number.isInteger(classId) || classId < 0) {
+    return {
+      issue: createIssue("error", "class_id", "Class id must be a non-negative integer.", null, lineNumber),
+    };
+  }
+
+  if (classNamesLength > 0 && classId >= classNamesLength) {
+    return {
+      issue: createIssue("error", "class_range", "Class id is outside the configured class list.", null, lineNumber),
+    };
+  }
+
+  const values = parts.slice(1).map(Number);
+  if (values.some((value) => !Number.isFinite(value))) {
+    return {
+      issue: createIssue("error", "segment_nan", "Segment label contains non-numeric values.", null, lineNumber),
+    };
+  }
+
+  const points = [];
+  for (let index = 0; index < values.length; index += 2) {
+    const x = values[index];
+    const y = values[index + 1];
+    if (x < 0 || x > 1 || y < 0 || y > 1) {
+      return {
+        issue: createIssue("error", "normalized_range", "Segment coordinates must stay within 0..1.", null, lineNumber),
+      };
+    }
+    points.push({ x, y });
+  }
+
+  if (points.length < 3) {
+    return {
+      issue: createIssue("error", "segment_points", "Segment polygon needs at least 3 points.", null, lineNumber),
+    };
+  }
+
+  return {
+    record: { type: "segment", classId, points },
+  };
+}
+
+function parseLabelText(text, taskType, classNamesLength, entryKey) {
+  const records = [];
+  const issues = [];
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  if (!lines.length) {
+    issues.push(createIssue("warning", "empty_label", "Label file is empty.", entryKey));
+    return { records, issues };
+  }
+
+  lines.forEach((line, index) => {
+    const lineNumber = index + 1;
+    const parts = line.split(/\s+/);
+    const result =
+      taskType === "segment"
+        ? parseSegmentLine(parts, classNamesLength, lineNumber)
+        : parseDetectLine(parts, classNamesLength, lineNumber);
+
+    if (result.issue) {
+      result.issue.entryKey = entryKey;
+      issues.push(result.issue);
+      return;
+    }
+
+    records.push(result.record);
+  });
+
+  return { records, issues };
+}
+
+function collectDuplicateIssues(files, kind) {
+  const seen = new Map();
+  const issues = [];
+
+  files.forEach((file) => {
+    const key = normalizeBaseName(file.name);
+    if (!key) {
+      return;
+    }
+    const count = seen.get(key) || 0;
+    seen.set(key, count + 1);
+  });
+
+  for (const [key, count] of seen.entries()) {
+    if (count > 1) {
+      issues.push(createIssue("warning", "duplicate_basename", `${kind} basename "${key}" appears ${count} times.`, key));
+    }
+  }
+
+  return issues;
+}
+
+async function buildDatasetEntries() {
+  const classNames = parseClassNames();
+  const imageMap = new Map();
+  const labelMap = new Map();
+
+  state.imageFiles.forEach((file) => {
+    const key = normalizeBaseName(file.name);
+    if (key && !imageMap.has(key)) {
+      imageMap.set(key, file);
+    }
+  });
+
+  state.labelFiles.forEach((file) => {
+    const key = normalizeBaseName(file.name);
+    if (key && !labelMap.has(key)) {
+      labelMap.set(key, file);
+    }
+  });
+
+  const allKeys = [...new Set([...imageMap.keys(), ...labelMap.keys()])].sort();
+  const entries = [];
+  const issues = [
+    ...collectDuplicateIssues(state.imageFiles, "Image"),
+    ...collectDuplicateIssues(state.labelFiles, "Label"),
+  ];
+
+  for (const key of allKeys) {
+    const imageFile = imageMap.get(key) || null;
+    const labelFile = labelMap.get(key) || null;
+    const entry = {
+      key,
+      imageFile,
+      labelFile,
+      imageInfo: null,
+      records: [],
+      issues: [],
+    };
+
+    if (!imageFile) {
+      entry.issues.push(createIssue("warning", "missing_image", "No image matches this label file.", key));
+    }
+
+    if (!labelFile) {
+      entry.issues.push(createIssue("warning", "missing_label", "No label matches this image file.", key));
+    }
+
+    if (imageFile) {
+      try {
+        entry.imageInfo = await loadImageInfo(imageFile);
+      } catch (error) {
+        entry.issues.push(createIssue("error", "image_load", error.message, key));
+      }
+    }
+
+    if (labelFile) {
+      const labelText = await labelFile.text();
+      const parsed = parseLabelText(labelText, state.taskType, classNames.length, key);
+      entry.records = parsed.records;
+      entry.issues.push(...parsed.issues);
+    }
+
+    issues.push(...entry.issues);
+    entries.push(entry);
+  }
+
+  return { entries, issues };
+}
+
+function updateMetrics() {
+  const matchedPairs = state.datasetEntries.filter((entry) => entry.imageFile && entry.labelFile).length;
+  elements.metricImages.textContent = String(state.imageFiles.length);
+  elements.metricLabels.textContent = String(state.labelFiles.length);
+  elements.metricPairs.textContent = String(matchedPairs);
+  elements.metricIssues.textContent = String(state.issues.length);
+  elements.inventoryHint.textContent = state.datasetEntries.length
+    ? `${state.datasetEntries.length} files tracked in the current dataset view.`
+    : "No analysis yet.";
+  elements.issueHint.textContent = state.issues.length
+    ? `${state.issues.length} issues found. Highest severity first.`
+    : "No issues reported yet.";
+}
+
+function renderDatasetList() {
+  if (!state.datasetEntries.length) {
+    elements.fileList.innerHTML = '<li class="empty-state">Run analysis to build the dataset list.</li>';
+    return;
+  }
+
+  const sortedEntries = [...state.datasetEntries].sort((left, right) => {
+    const leftWeight = left.issues.reduce((sum, issue) => sum + getIssueWeight(issue.level), 0);
+    const rightWeight = right.issues.reduce((sum, issue) => sum + getIssueWeight(issue.level), 0);
+    return rightWeight - leftWeight || left.key.localeCompare(right.key);
+  });
+
+  elements.fileList.innerHTML = sortedEntries
+    .map((entry) => {
+      const issueCount = entry.issues.length;
+      const imageLabel = entry.imageFile ? entry.imageFile.name : "missing image";
+      const labelLabel = entry.labelFile ? entry.labelFile.name : "missing label";
+      const activeClass = entry.key === state.selectedEntryKey ? "stack-item active" : "stack-item";
+
+      return `
+        <li class="${activeClass}">
+          <button type="button" data-entry-key="${entry.key}">
+            <p class="item-title">${entry.key}</p>
+            <p class="item-meta">${imageLabel} | ${labelLabel}</p>
+            <p class="item-meta">${entry.records.length} parsed records | ${issueCount} issues</p>
+          </button>
+        </li>
+      `;
+    })
+    .join("");
+}
+
+function renderIssueList() {
+  if (!state.issues.length) {
+    elements.issueList.innerHTML = '<li class="empty-state">Dataset issues will appear here.</li>';
+    return;
+  }
+
+  const sortedIssues = [...state.issues].sort((left, right) => getIssueWeight(right.level) - getIssueWeight(left.level));
+  elements.issueList.innerHTML = sortedIssues
+    .map((issue) => {
+      const itemClass = issue.level === "error" ? "stack-item issue-error" : "stack-item issue-warning";
+      const lineMeta = issue.line ? ` | line ${issue.line}` : "";
+      const keyMeta = issue.entryKey ? ` | ${issue.entryKey}` : "";
+      return `
+        <li class="${itemClass}">
+          <p class="issue-title">${issue.code}</p>
+          <p class="issue-meta">${issue.message}${keyMeta}${lineMeta}</p>
+        </li>
+      `;
+    })
+    .join("");
+}
+
+function getSelectedEntry() {
+  if (!state.selectedEntryKey) {
+    return null;
+  }
+  return state.datasetEntries.find((entry) => entry.key === state.selectedEntryKey) || null;
+}
+
+function fitImageToCanvas(imageWidth, imageHeight, canvasWidth, canvasHeight) {
+  const scale = Math.min(canvasWidth / imageWidth, canvasHeight / imageHeight);
+  const width = imageWidth * scale;
+  const height = imageHeight * scale;
+  return {
+    scale,
+    width,
+    height,
+    x: (canvasWidth - width) / 2,
+    y: (canvasHeight - height) / 2,
+  };
+}
+
+function drawDetectRecord(context, record, frame) {
+  const boxWidth = record.width * frame.width;
+  const boxHeight = record.height * frame.height;
+  const x = frame.x + (record.xCenter * frame.width - boxWidth / 2);
+  const y = frame.y + (record.yCenter * frame.height - boxHeight / 2);
+  context.strokeRect(x, y, boxWidth, boxHeight);
+}
+
+function drawSegmentRecord(context, record, frame) {
+  if (!record.points.length) {
+    return;
+  }
+
+  context.beginPath();
+  record.points.forEach((point, index) => {
+    const x = frame.x + point.x * frame.width;
+    const y = frame.y + point.y * frame.height;
+    if (index === 0) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  });
+  context.closePath();
+  context.stroke();
+}
+
+function renderPreview() {
+  const canvas = elements.previewCanvas;
+  const context = canvas.getContext("2d");
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "rgba(148, 163, 184, 0.12)";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  const entry = getSelectedEntry();
+  if (!entry) {
+    elements.previewName.textContent = "Nothing selected.";
+    elements.previewImageMeta.textContent = "-";
+    elements.previewLabelMeta.textContent = "-";
+    context.fillStyle = "rgba(255,255,255,0.72)";
+    context.font = "20px Segoe UI";
+    context.fillText("Select a dataset item to preview.", 32, 48);
+    return;
+  }
+
+  elements.previewName.textContent = entry.key;
+  elements.previewLabelMeta.textContent = `${entry.records.length} records | ${entry.issues.length} issues`;
+
+  if (!entry.imageInfo) {
+    elements.previewImageMeta.textContent = "No image available";
+    context.fillStyle = "rgba(255,255,255,0.72)";
+    context.font = "20px Segoe UI";
+    context.fillText("No image found for this entry.", 32, 48);
+    return;
+  }
+
+  const image = state.previewImage;
+  if (!image || image.dataset.entryKey !== entry.key) {
+    const previewImage = new Image();
+    previewImage.onload = () => {
+      state.previewImage = previewImage;
+      renderPreview();
+    };
+    previewImage.dataset.entryKey = entry.key;
+    previewImage.src = entry.imageInfo.url;
+    return;
+  }
+
+  const frame = fitImageToCanvas(image.naturalWidth, image.naturalHeight, canvas.width, canvas.height);
+  context.drawImage(image, frame.x, frame.y, frame.width, frame.height);
+  context.lineWidth = 2;
+  context.strokeStyle = "#22d3ee";
+  context.fillStyle = "#22d3ee";
+  context.font = "14px Segoe UI";
+
+  entry.records.forEach((record, index) => {
+    if (record.type === "segment") {
+      drawSegmentRecord(context, record, frame);
+    } else {
+      drawDetectRecord(context, record, frame);
+    }
+    context.fillText(`#${index} c${record.classId}`, frame.x + 10, frame.y + 22 + index * 18);
+  });
+
+  elements.previewImageMeta.textContent = `${entry.imageInfo.width} x ${entry.imageInfo.height}`;
+}
+
+function selectEntry(entryKey) {
+  state.selectedEntryKey = entryKey;
+  state.previewImage = null;
+  renderDatasetList();
+  renderPreview();
+}
+
+function buildReportPayload() {
+  return {
+    generatedAt: new Date().toISOString(),
+    taskType: state.taskType,
+    classNames: parseClassNames(),
+    summary: {
+      imageCount: state.imageFiles.length,
+      labelCount: state.labelFiles.length,
+      entryCount: state.datasetEntries.length,
+      issueCount: state.issues.length,
+    },
+    entries: state.datasetEntries.map((entry) => ({
+      key: entry.key,
+      imageName: entry.imageFile?.name || null,
+      labelName: entry.labelFile?.name || null,
+      parsedRecordCount: entry.records.length,
+      issues: entry.issues,
+    })),
+    issues: state.issues,
+  };
+}
+
+function downloadJson(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+async function analyzeDataset() {
+  if (!state.imageFiles.length && !state.labelFiles.length) {
+    setStatus("Select at least one image or label file before analysis.", "error");
+    return;
+  }
+
+  setStatus("Running YOLO dataset analysis...");
+  const result = await buildDatasetEntries();
+  state.datasetEntries = result.entries;
+  state.issues = result.issues;
+
+  if (!state.selectedEntryKey && state.datasetEntries.length) {
+    state.selectedEntryKey = state.datasetEntries[0].key;
+  }
+
+  updateMetrics();
+  renderDatasetList();
+  renderIssueList();
+  renderPreview();
+
+  if (state.issues.length) {
+    setStatus(`Analysis complete. ${state.issues.length} issues found.`, "warn");
+  } else {
+    setStatus(`Analysis complete. ${state.datasetEntries.length} dataset entries look clean.`);
+  }
+}
+
+function syncTaskTypeUI() {
+  state.taskType = elements.taskType.value || "detect";
+  elements.heroTaskType.textContent = state.taskType === "segment" ? "Segment" : "Detect";
+}
+
+elements.imageInput.addEventListener("change", (event) => {
+  state.imageFiles = [...(event.target.files || [])];
+  updateMetrics();
+  setStatus(`${state.imageFiles.length} image files selected.`);
+});
+
+elements.labelInput.addEventListener("change", (event) => {
+  state.labelFiles = [...(event.target.files || [])];
+  updateMetrics();
+  setStatus(`${state.labelFiles.length} label files selected.`);
+});
+
+elements.taskType.addEventListener("change", () => {
+  syncTaskTypeUI();
+  setStatus(`Switched parser mode to ${state.taskType}.`);
+});
+
+elements.analyzeButton.addEventListener("click", () => {
+  analyzeDataset();
+});
+
+elements.exportReportButton.addEventListener("click", () => {
+  const payload = buildReportPayload();
+  downloadJson(`yolo-qa-report-${state.taskType}.json`, payload);
+  setStatus("Exported the current QA report.");
+});
+
+elements.fileList.addEventListener("click", (event) => {
+  const trigger = event.target.closest("[data-entry-key]");
+  if (!trigger) {
+    return;
+  }
+  selectEntry(trigger.dataset.entryKey);
+});
+
+syncTaskTypeUI();
+updateMetrics();
+renderDatasetList();
+renderIssueList();
+renderPreview();

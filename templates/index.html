@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GeoDraft YOLO QA</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">YOLO DATASET QA</p>
+          <h1>Import labels, inspect issues, preview overlays</h1>
+          <p class="hero-copy">
+            This build focuses on browser-side dataset inspection for YOLO detect and segment formats.
+          </p>
+        </div>
+        <div class="hero-meta">
+          <div class="meta-card">
+            <span class="meta-label">Mode</span>
+            <strong id="hero-task-type">Detect</strong>
+          </div>
+          <div class="meta-card">
+            <span class="meta-label">Health</span>
+            <strong id="hero-health">Ready</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel controls-panel">
+        <div class="panel-head">
+          <h2>Dataset Inputs</h2>
+          <p id="status-line" class="status-line">Select images and label files, then run analysis.</p>
+        </div>
+
+        <div class="controls-grid">
+          <label class="field">
+            <span>YOLO task</span>
+            <select id="task-type">
+              <option value="detect">Detect</option>
+              <option value="segment">Segment</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Image files</span>
+            <input id="image-input" type="file" accept="image/*" multiple />
+          </label>
+
+          <label class="field">
+            <span>Label files</span>
+            <input id="label-input" type="file" accept=".txt,text/plain" multiple />
+          </label>
+
+          <label class="field field-wide">
+            <span>Class names</span>
+            <textarea
+              id="class-names"
+              rows="4"
+              placeholder="One class per line, for example:&#10;crack&#10;spall&#10;leak"
+            ></textarea>
+          </label>
+        </div>
+
+        <div class="action-row">
+          <button id="analyze-button" class="primary" type="button">Analyze dataset</button>
+          <button id="export-report-button" class="ghost" type="button">Export JSON report</button>
+        </div>
+      </section>
+
+      <section class="metrics-grid">
+        <article class="metric-card">
+          <span class="metric-label">Images</span>
+          <strong id="metric-images">0</strong>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Labels</span>
+          <strong id="metric-labels">0</strong>
+        </article>
+        <article class="metric-card">
+          <span class="metric-label">Matched pairs</span>
+          <strong id="metric-pairs">0</strong>
+        </article>
+        <article class="metric-card danger">
+          <span class="metric-label">Issues</span>
+          <strong id="metric-issues">0</strong>
+        </article>
+      </section>
+
+      <section class="workspace-grid">
+        <article class="panel file-panel">
+          <div class="panel-head">
+            <h2>Dataset Inventory</h2>
+            <p id="inventory-hint" class="panel-hint">No analysis yet.</p>
+          </div>
+          <ul id="file-list" class="stack-list">
+            <li class="empty-state">Run analysis to build the dataset list.</li>
+          </ul>
+        </article>
+
+        <article class="panel issues-panel">
+          <div class="panel-head">
+            <h2>Issue Feed</h2>
+            <p id="issue-hint" class="panel-hint">No issues reported yet.</p>
+          </div>
+          <ul id="issue-list" class="stack-list">
+            <li class="empty-state">Dataset issues will appear here.</li>
+          </ul>
+        </article>
+
+        <article class="panel preview-panel">
+          <div class="panel-head">
+            <h2>Preview</h2>
+            <p id="preview-name" class="panel-hint">Nothing selected.</p>
+          </div>
+          <div class="preview-stage">
+            <canvas id="preview-canvas" width="960" height="640"></canvas>
+          </div>
+          <div class="preview-meta">
+            <div>
+              <span class="meta-label">Image</span>
+              <strong id="preview-image-meta">-</strong>
+            </div>
+            <div>
+              <span class="meta-label">Labels</span>
+              <strong id="preview-label-meta">-</strong>
+            </div>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  </body>
+</html>
