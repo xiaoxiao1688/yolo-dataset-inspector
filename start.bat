@@ -84,28 +84,19 @@ echo [OK] Dependencies installed.
 
 echo.
 echo [INFO] Running environment self-check...
-call .venv\Scripts\python -c "
-import sys
-import json
-
-checks = {
-    'python_version': '.'.join(map(str, sys.version_info[:3])),
-    'python_path': sys.executable,
-    'requirements': [],
-    'status': 'ok'
-}
-
-required_packages = ['flask']
-for pkg in required_packages:
-    try:
-        __import__(pkg)
-        checks['requirements'].append({'package': pkg, 'status': 'ok'})
-    except ImportError:
-        checks['requirements'].append({'package': pkg, 'status': 'missing'})
-        checks['status'] = 'error'
-
-print(json.dumps(checks, indent=2))
-"
+if exist self_check.py (
+    call .venv\Scripts\python self_check.py
+    if %errorlevel% neq 0 (
+        echo.
+        echo [ERROR] Self-check failed! Please review the issues above.
+        pause
+        exit /b 1
+    )
+    echo.
+    echo [OK] Self-check passed.
+) else (
+    echo [WARN] self_check.py not found, skipping detailed self-check...
+)
 
 echo.
 echo ========================================

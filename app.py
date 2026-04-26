@@ -175,54 +175,252 @@ def get_env():
     return jsonify(get_environment_info())
 
 
+def _check_frontend_files():
+    base_dir = os.path.dirname(__file__)
+    expected_files = {
+        "static/css/styles.css": "Frontend stylesheet",
+        "static/js/app.js": "Frontend application (YOLO parser)",
+        "templates/index.html": "Main HTML template"
+    }
+
+    results = []
+    all_ok = True
+
+    for rel_path, description in expected_files.items():
+        abs_path = os.path.join(base_dir, rel_path)
+        exists = os.path.exists(abs_path)
+        file_size = os.path.getsize(abs_path) if exists else 0
+
+        results.append({
+            "path": rel_path,
+            "description": description,
+            "exists": exists,
+            "size_bytes": file_size,
+            "status": "ok" if exists and file_size > 0 else "warning"
+        })
+
+        if not exists or file_size == 0:
+            all_ok = False
+
+    return {
+        "check_type": "static_file_existence",
+        "note": "This only verifies file existence, not runtime behavior",
+        "files": results,
+        "overall": "ok" if all_ok else "warning"
+    }
+
+
+def _run_yolo_validation_self_test():
+    tests = {
+        "detect": [
+            {
+                "label": "valid_bbox",
+                "input": "0 0.5 0.5 0.3 0.4",
+                "expected_valid": True
+            },
+            {
+                "label": "invalid_coord_out_of_range",
+                "input": "0 1.5 0.5 0.3 0.4",
+                "expected_valid": False
+            }
+        ],
+        "segment": [
+            {
+                "label": "valid_polygon",
+                "input": "0 0.1 0.2 0.3 0.4 0.5 0.6 0.2 0.8",
+                "expected_valid": True
+            },
+            {
+                "label": "insufficient_points",
+                "input": "0 0.1 0.2 0.3 0.4",
+                "expected_valid": False
+            }
+        ]
+    }
+
+    results = {}
+    all_passed = True
+
+    for task_type, test_cases in tests.items():
+        task_results = []
+        task_passed = True
+
+        for test_case in test_cases:
+            if task_type == "detect":
+                result = validate_yolo_detect_line(test_case["input"])
+            else:
+                result = validate_yolo_segment_line(test_case["input"])
+
+            passed = result["valid"] == test_case["expected_valid"]
+
+            task_results.append({
+                "test_label": test_case["label"],
+                "input": test_case["input"],
+                "expected_valid": test_case["expected_valid"],
+                "actual_valid": result["valid"],
+                "passed": passed
+            })
+
+            if not passed:
+                task_passed = False
+                all_passed = False
+
+        results[task_type] = {
+            "tests": task_results,
+            "all_passed": task_passed
+        }
+
+    return {
+        "check_type": "runtime_validation_test",
+        "note": "This runs actual validation logic against known-good and known-bad inputs",
+        "results": results,
+        "overall": "ok" if all_passed else "error"
+    }
+
+
 @app.get("/api/self-check")
 def self_check():
     env_info = get_environment_info()
+
+    frontend_check = _check_frontend_files()
+    yolo_validation_check = _run_yolo_validation_self_test()
+
+    verified_ok = (
+        env_info["status"] == "ok" and
+        yolo_validation_check["overall"] == "ok"
+    )
+
+    overall_status = "ok" if verified_ok else "error"
+
     checks = {
-        "environment": env_info,
-        "frontend": {
-            "status": "ok",
-            "features": [
-                "Image file import",
-                "Label file import",
-                "Detect mode parsing",
-                "Segment mode parsing",
-                "Annotation preview",
-                "Issue detection",
-                "JSON report export"
-            ]
-        },
-        "yolo_support": {
-            "detect": {
-                "status": "ok",
-                "format": "class_id x_center y_center width height",
-                "validation": "Available via /api/validate/detect"
+        "verified_checks": {
+            "description": "These checks are actually verified at runtime",
+            "environment": {
+                "check_type": "runtime_environment",
+                "status": env_info["status"],
+                "python_version": env_info["python_version"],
+                "python_path": env_info["python_path"],
+                "platform": env_info["platform"],
+                "requirements": env_info["requirements"]
             },
-            "segment": {
-                "status": "ok",
-                "format": "class_id x1 y1 x2 y2 x3 y3 ...",
-                "validation": "Available via /api/validate/segment"
+            "yolo_validation_functions": {
+                "check_type": "runtime_function_test",
+                "status": yolo_validation_check["overall"],
+                "details": yolo_validation_check
+            }
+        },
+        "static_declarations": {
+            "description": "These are static declarations or existence checks, not full runtime verification",
+            "frontend_files": {
+                "note": "Only verifies file existence, not that JavaScript runs correctly",
+                "status": frontend_check["overall"],
+                "details": frontend_check
+            },
+            "declared_features": {
+                "note": "These features are implemented in static/js/app.js but not verified by this API",
+                "frontend": [
+                    "Image file import",
+                    "Label file import",
+                    "Detect mode parsing",
+                    "Segment mode parsing",
+                    "Annotation preview",
+                    "Issue detection",
+                    "JSON report export"
+                ],
+                "yolo_formats": {
+                    "detect": {
+                        "format": "class_id x_center y_center width height",
+                        "validation_api": "/api/validate/detect"
+                    },
+                    "segment": {
+                        "format": "class_id x1 y1 x2 y2 x3 y3 ...",
+                        "validation_api": "/api/validate/segment"
+                    }
+                }
             }
         },
         "summary": {
-            "total_checks": 3,
-            "passed": 2 + (1 if env_info["status"] == "ok" else 0),
-            "failed": 0 if env_info["status"] == "ok" else 1
+            "verified_checks_total": 2,
+            "verified_checks_passed": sum([
+                1 if env_info["status"] == "ok" else 0,
+                1 if yolo_validation_check["overall"] == "ok" else 0
+            ]),
+            "verified_checks_failed": sum([
+                0 if env_info["status"] == "ok" else 1,
+                0 if yolo_validation_check["overall"] == "ok" else 1
+            ]),
+            "static_declarations_count": 2,
+            "note": "Only 'verified_checks' are actually validated; 'static_declarations' are informational only"
         }
     }
 
-    overall_status = "ok" if env_info["status"] == "ok" else "error"
-    return jsonify({"status": overall_status, "checks": checks})
+    return jsonify({
+        "status": overall_status,
+        "checks": checks,
+        "critical_note": "This API distinguishes between VERIFIED checks (actually run and validated) and STATIC declarations (just stated to exist). Do not assume 'ok' status means full end-to-end functionality is tested."
+    })
 
 
 @app.post("/api/validate/detect")
 def validate_detect():
-    data = request.get_json()
-    if not data or "lines" not in data:
-        return jsonify({"error": "Missing 'lines' in request body"}), 400
+    try:
+        data = request.get_json()
+    except Exception:
+        return jsonify({
+            "error": "Invalid JSON request body",
+            "expected": {"lines": ["string", "..."], "class_count": "optional integer"}
+        }), 400
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "error": "Request body must be a JSON object",
+            "expected": "object",
+            "received": type(data).__name__
+        }), 400
+
+    if "lines" not in data:
+        return jsonify({
+            "error": "Missing required field: 'lines'",
+            "expected": {"lines": ["string", "..."]}
+        }), 400
 
     lines = data["lines"]
+
+    if not isinstance(lines, list):
+        return jsonify({
+            "error": "'lines' must be an array",
+            "expected": "array",
+            "received": type(lines).__name__
+        }), 400
+
+    if len(lines) == 0:
+        return jsonify({
+            "error": "'lines' array cannot be empty",
+            "expected": "at least one label line"
+        }), 400
+
+    for i, line in enumerate(lines):
+        if not isinstance(line, str):
+            return jsonify({
+                "error": f"Line at index {i} is not a string",
+                "expected": "string",
+                "received": type(line).__name__,
+                "line_index": i
+            }), 400
+
     class_count = data.get("class_count")
+    if class_count is not None:
+        if not isinstance(class_count, int):
+            return jsonify({
+                "error": "'class_count' must be an integer",
+                "expected": "integer",
+                "received": type(class_count).__name__
+            }), 400
+        if class_count < 0:
+            return jsonify({
+                "error": "'class_count' must be non-negative",
+                "received": class_count
+            }), 400
 
     results = []
     total_errors = 0
@@ -248,12 +446,64 @@ def validate_detect():
 
 @app.post("/api/validate/segment")
 def validate_segment():
-    data = request.get_json()
-    if not data or "lines" not in data:
-        return jsonify({"error": "Missing 'lines' in request body"}), 400
+    try:
+        data = request.get_json()
+    except Exception:
+        return jsonify({
+            "error": "Invalid JSON request body",
+            "expected": {"lines": ["string", "..."], "class_count": "optional integer"}
+        }), 400
+
+    if not isinstance(data, dict):
+        return jsonify({
+            "error": "Request body must be a JSON object",
+            "expected": "object",
+            "received": type(data).__name__
+        }), 400
+
+    if "lines" not in data:
+        return jsonify({
+            "error": "Missing required field: 'lines'",
+            "expected": {"lines": ["string", "..."]}
+        }), 400
 
     lines = data["lines"]
+
+    if not isinstance(lines, list):
+        return jsonify({
+            "error": "'lines' must be an array",
+            "expected": "array",
+            "received": type(lines).__name__
+        }), 400
+
+    if len(lines) == 0:
+        return jsonify({
+            "error": "'lines' array cannot be empty",
+            "expected": "at least one label line"
+        }), 400
+
+    for i, line in enumerate(lines):
+        if not isinstance(line, str):
+            return jsonify({
+                "error": f"Line at index {i} is not a string",
+                "expected": "string",
+                "received": type(line).__name__,
+                "line_index": i
+            }), 400
+
     class_count = data.get("class_count")
+    if class_count is not None:
+        if not isinstance(class_count, int):
+            return jsonify({
+                "error": "'class_count' must be an integer",
+                "expected": "integer",
+                "received": type(class_count).__name__
+            }), 400
+        if class_count < 0:
+            return jsonify({
+                "error": "'class_count' must be non-negative",
+                "received": class_count
+            }), 400
 
     results = []
     total_errors = 0

@@ -85,29 +85,19 @@ Write-Host "[OK] Dependencies installed." -ForegroundColor Green
 
 Write-Host ""
 Write-Host "[INFO] Running environment self-check..." -ForegroundColor Yellow
-$checkScript = @"
-import sys
-import json
-
-checks = {
-    'python_version': '.'.join(map(str, sys.version_info[:3])),
-    'python_path': sys.executable,
-    'requirements': [],
-    'status': 'ok'
+if (Test-Path "self_check.py") {
+    & ".\.venv\Scripts\python.exe" self_check.py
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Host "[ERROR] Self-check failed! Please review the issues above." -ForegroundColor Red
+        Read-Host "Press Enter to exit"
+        exit 1
+    }
+    Write-Host ""
+    Write-Host "[OK] Self-check passed." -ForegroundColor Green
+} else {
+    Write-Host "[WARN] self_check.py not found, skipping detailed self-check..." -ForegroundColor Yellow
 }
-
-required_packages = ['flask']
-for pkg in required_packages:
-    try:
-        __import__(pkg)
-        checks['requirements'].append({'package': pkg, 'status': 'ok'})
-    except ImportError:
-        checks['requirements'].append({'package': pkg, 'status': 'missing'})
-        checks['status'] = 'error'
-
-print(json.dumps(checks, indent=2))
-"@
-& ".\.venv\Scripts\python.exe" -c $checkScript
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
