@@ -10,14 +10,19 @@ const elements = {
   issueHint: document.querySelector("#issue-hint"),
   issueList: document.querySelector("#issue-list"),
   labelInput: document.querySelector("#label-input"),
+  labelTextList: document.querySelector("#label-text-list"),
   metricImages: document.querySelector("#metric-images"),
   metricIssues: document.querySelector("#metric-issues"),
   metricLabels: document.querySelector("#metric-labels"),
   metricPairs: document.querySelector("#metric-pairs"),
   previewCanvas: document.querySelector("#preview-canvas"),
+  previewCanvasTab: document.querySelector("#preview-canvas-tab"),
   previewImageMeta: document.querySelector("#preview-image-meta"),
   previewLabelMeta: document.querySelector("#preview-label-meta"),
+  previewLabelsTab: document.querySelector("#preview-labels-tab"),
   previewName: document.querySelector("#preview-name"),
+  previewTabs: document.querySelectorAll(".preview-tab"),
+  previewContents: document.querySelectorAll(".preview-content"),
   statusLine: document.querySelector("#status-line"),
   taskType: document.querySelector("#task-type"),
 };
@@ -29,6 +34,9 @@ const state = {
   labelFiles: [],
   previewImage: null,
   selectedEntryKey: null,
+  selectedIssue: null,
+  highlightedRecordIndex: null,
+  highlightedLineNumber: null,
   taskType: "detect",
 };
 
@@ -168,19 +176,33 @@ function parseSegmentLine(parts, classNamesLength, lineNumber) {
 function parseLabelText(text, taskType, classNamesLength, entryKey) {
   const records = [];
   const issues = [];
-  const lines = String(text || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  const rawLines = String(text || "").split(/\r?\n/);
+  const lineToRecordMap = new Map();
+  const lineToIssueMap = new Map();
+  let recordIndex = 0;
 
-  if (!lines.length) {
+  if (!rawLines.some((line) => line.trim())) {
     issues.push(createIssue("warning", "empty_label", "Label file is empty.", entryKey));
-    return { records, issues };
+    return {
+      records,
+      issues,
+      rawText: text,
+      rawLines,
+      lineToRecordMap,
+      lineToIssueMap,
+    };
   }
 
-  lines.forEach((line, index) => {
-    const lineNumber = index + 1;
-    const parts = line.split(/\s+/);
+  for (let rawLineIndex = 0; rawLineIndex < rawLines.length; rawLineIndex++) {
+    const rawLine = rawLines[rawLineIndex];
+    const trimmedLine = rawLine.trim();
+    const lineNumber = rawLineIndex + 1;
+
+    if (!trimmedLine) {
+      continue;
+    }
+
+    const parts = trimmedLine.split(/\s+/);
     const result =
       taskType === "segment"
         ? parseSegmentLine(parts, classNamesLength, lineNumber)
@@ -188,14 +210,29 @@ function parseLabelText(text, taskType, classNamesLength, entryKey) {
 
     if (result.issue) {
       result.issue.entryKey = entryKey;
+      result.issue.rawLineText = rawLine;
       issues.push(result.issue);
-      return;
+
+      const existingIssues = lineToIssueMap.get(lineNumber) || [];
+      existingIssues.push(result.issue);
+      lineToIssueMap.set(lineNumber, existingIssues);
+    } else if (result.record) {
+      result.record.rawLineNumber = lineNumber;
+      result.record.rawLineText = rawLine;
+      records.push(result.record);
+      lineToRecordMap.set(lineNumber, recordIndex);
+      recordIndex++;
     }
+  }
 
-    records.push(result.record);
-  });
-
-  return { records, issues };
+  return {
+    records,
+    issues,
+    rawText: text,
+    rawLines,
+    lineToRecordMap,
+    lineToIssueMap,
+  };
 }
 
 function collectDuplicateIssues(files, kind) {
@@ -256,6 +293,10 @@ async function buildDatasetEntries() {
       imageInfo: null,
       records: [],
       issues: [],
+      labelRawText: null,
+      labelRawLines: [],
+      lineToRecordMap: new Map(),
+      lineToIssueMap: new Map(),
     };
 
     if (!imageFile) {
@@ -279,6 +320,10 @@ async function buildDatasetEntries() {
       const parsed = parseLabelText(labelText, state.taskType, classNames.length, key);
       entry.records = parsed.records;
       entry.issues.push(...parsed.issues);
+      entry.labelRawText = parsed.rawText;
+      entry.labelRawLines = parsed.rawLines;
+      entry.lineToRecordMap = parsed.lineToRecordMap;
+      entry.lineToIssueMap = parsed.lineToIssueMap;
     }
 
     issues.push(...entry.issues);
@@ -342,12 +387,21 @@ function renderIssueList() {
 
   const sortedIssues = [...state.issues].sort((left, right) => getIssueWeight(right.level) - getIssueWeight(left.level));
   elements.issueList.innerHTML = sortedIssues
-    .map((issue) => {
-      const itemClass = issue.level === "error" ? "stack-item issue-error" : "stack-item issue-warning";
+    .map((issue, index) => {
+      const baseClass = issue.level === "error" ? "issue-error" : "issue-warning";
+      const selectedClass = state.selectedIssue === index ? " selected" : "";
+      const itemClass = `stack-item ${baseClass} issue-item-clickable${selectedClass}`;
+
       const lineMeta = issue.line ? ` | line ${issue.line}` : "";
       const keyMeta = issue.entryKey ? ` | ${issue.entryKey}` : "";
+
+      const dataAttrs = [];
+      if (issue.entryKey) dataAttrs.push(`data-entry-key="${issue.entryKey}"`);
+      if (issue.line) dataAttrs.push(`data-line="${issue.line}"`);
+      dataAttrs.push(`data-issue-index="${index}"`);
+
       return `
-        <li class="${itemClass}">
+        <li class="${itemClass}" ${dataAttrs.join(" ")}>
           <p class="issue-title">${issue.code}</p>
           <p class="issue-meta">${issue.message}${keyMeta}${lineMeta}</p>
         </li>
@@ -363,6 +417,178 @@ function getSelectedEntry() {
   return state.datasetEntries.find((entry) => entry.key === state.selectedEntryKey) || null;
 }
 
+function getRecordIndexFromLineNumber(entry, lineNumber) {
+  if (!entry || !entry.lineToRecordMap) {
+    return null;
+  }
+  const recordIndex = entry.lineToRecordMap.get(lineNumber);
+  return recordIndex !== undefined ? recordIndex : null;
+}
+
+function getIssuesFromLineNumber(entry, lineNumber) {
+  if (!entry || !entry.lineToIssueMap) {
+    return [];
+  }
+  return entry.lineToIssueMap.get(lineNumber) || [];
+}
+
+function selectIssue(issueIndex) {
+  if (issueIndex === null || issueIndex === undefined || issueIndex < 0 || issueIndex >= state.issues.length) {
+    state.selectedIssue = null;
+    state.highlightedRecordIndex = null;
+    state.highlightedLineNumber = null;
+    renderIssueList();
+    renderPreview();
+    renderLabelTextList();
+    return;
+  }
+
+  const issue = state.issues[issueIndex];
+  state.selectedIssue = issueIndex;
+
+  if (issue.entryKey) {
+    if (state.selectedEntryKey !== issue.entryKey) {
+      state.selectedEntryKey = issue.entryKey;
+      state.previewImage = null;
+      renderDatasetList();
+    }
+
+    if (issue.line !== undefined && issue.line !== null) {
+      state.highlightedLineNumber = issue.line;
+
+      const entry = getSelectedEntry();
+      if (entry) {
+        const recordIndex = getRecordIndexFromLineNumber(entry, issue.line);
+        state.highlightedRecordIndex = recordIndex;
+
+        switchPreviewTab("labels");
+      }
+    } else {
+      state.highlightedLineNumber = null;
+      state.highlightedRecordIndex = null;
+    }
+  } else {
+    state.highlightedLineNumber = null;
+    state.highlightedRecordIndex = null;
+  }
+
+  setStatus(`Selected issue: ${issue.code}${issue.line ? ` at line ${issue.line}` : ""}`);
+  renderIssueList();
+  renderPreview();
+  renderLabelTextList();
+}
+
+function selectLabelLine(lineNumber) {
+  const entry = getSelectedEntry();
+  if (!entry) {
+    return;
+  }
+
+  state.highlightedLineNumber = lineNumber;
+
+  const recordIndex = getRecordIndexFromLineNumber(entry, lineNumber);
+  state.highlightedRecordIndex = recordIndex;
+
+  const issues = getIssuesFromLineNumber(entry, lineNumber);
+  if (issues.length > 0) {
+    for (let i = 0; i < state.issues.length; i++) {
+      if (state.issues[i] === issues[0]) {
+        state.selectedIssue = i;
+        break;
+      }
+    }
+  } else {
+    state.selectedIssue = null;
+  }
+
+  if (recordIndex !== null) {
+    switchPreviewTab("canvas");
+  }
+
+  renderIssueList();
+  renderPreview();
+  renderLabelTextList();
+}
+
+function switchPreviewTab(tabId) {
+  if (!elements.previewTabs || !elements.previewContents) {
+    return;
+  }
+
+  elements.previewTabs.forEach((tab) => {
+    if (tab.dataset.tab === tabId) {
+      tab.classList.add("active");
+    } else {
+      tab.classList.remove("active");
+    }
+  });
+
+  elements.previewContents.forEach((content) => {
+    if (tabId === "canvas" && content.id === "preview-canvas-tab") {
+      content.classList.add("active");
+    } else if (tabId === "labels" && content.id === "preview-labels-tab") {
+      content.classList.add("active");
+    } else {
+      content.classList.remove("active");
+    }
+  });
+}
+
+function renderLabelTextList() {
+  if (!elements.labelTextList) {
+    return;
+  }
+
+  const entry = getSelectedEntry();
+  if (!entry || !entry.labelRawLines || entry.labelRawLines.length === 0) {
+    elements.labelTextList.innerHTML = '<div class="empty-state">Select a dataset item with labels to view.</div>';
+    return;
+  }
+
+  const html = entry.labelRawLines
+    .map((line, index) => {
+      const lineNumber = index + 1;
+      const isHighlighted = state.highlightedLineNumber === lineNumber;
+      const issues = getIssuesFromLineNumber(entry, lineNumber);
+      const hasIssue = issues.length > 0;
+      const hasError = issues.some((i) => i.level === "error");
+      const recordIndex = getRecordIndexFromLineNumber(entry, lineNumber);
+      const isParsedRecord = recordIndex !== null;
+
+      let lineClasses = "label-line";
+      if (isHighlighted) lineClasses += " selected";
+      if (hasError) lineClasses += " has-error";
+      else if (hasIssue) lineClasses += " has-warning";
+
+      let statusHtml = "";
+      if (hasIssue) {
+        const issueType = hasError ? "error" : "warning";
+        const issueCodes = issues.map((i) => i.code).join(", ");
+        statusHtml = `<span class="label-line-status ${issueType}">${issueCodes}</span>`;
+      } else if (isParsedRecord) {
+        statusHtml = `<span class="label-line-status" style="color: #86efac;">record #${recordIndex}</span>`;
+      }
+
+      const displayLine = line || " ";
+
+      return `
+        <div class="${lineClasses}" data-line-number="${lineNumber}">
+          <span class="label-line-number">${lineNumber}</span>
+          <span class="label-line-content">${escapeHtml(displayLine)}${statusHtml}</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  elements.labelTextList.innerHTML = html;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 function fitImageToCanvas(imageWidth, imageHeight, canvasWidth, canvasHeight) {
   const scale = Math.min(canvasWidth / imageWidth, canvasHeight / imageHeight);
   const width = imageWidth * scale;
@@ -376,15 +602,24 @@ function fitImageToCanvas(imageWidth, imageHeight, canvasWidth, canvasHeight) {
   };
 }
 
-function drawDetectRecord(context, record, frame) {
+function drawDetectRecord(context, record, frame, isHighlighted = false) {
   const boxWidth = record.width * frame.width;
   const boxHeight = record.height * frame.height;
   const x = frame.x + (record.xCenter * frame.width - boxWidth / 2);
   const y = frame.y + (record.yCenter * frame.height - boxHeight / 2);
-  context.strokeRect(x, y, boxWidth, boxHeight);
+
+  if (isHighlighted) {
+    context.setLineDash([6, 4]);
+    context.lineWidth = 4;
+    context.strokeRect(x, y, boxWidth, boxHeight);
+    context.setLineDash([]);
+    context.lineWidth = 2;
+  } else {
+    context.strokeRect(x, y, boxWidth, boxHeight);
+  }
 }
 
-function drawSegmentRecord(context, record, frame) {
+function drawSegmentRecord(context, record, frame, isHighlighted = false) {
   if (!record.points.length) {
     return;
   }
@@ -400,7 +635,16 @@ function drawSegmentRecord(context, record, frame) {
     }
   });
   context.closePath();
-  context.stroke();
+
+  if (isHighlighted) {
+    context.setLineDash([6, 4]);
+    context.lineWidth = 4;
+    context.stroke();
+    context.setLineDash([]);
+    context.lineWidth = 2;
+  } else {
+    context.stroke();
+  }
 }
 
 function renderPreview() {
@@ -446,19 +690,59 @@ function renderPreview() {
 
   const frame = fitImageToCanvas(image.naturalWidth, image.naturalHeight, canvas.width, canvas.height);
   context.drawImage(image, frame.x, frame.y, frame.width, frame.height);
-  context.lineWidth = 2;
-  context.strokeStyle = "#22d3ee";
-  context.fillStyle = "#22d3ee";
+
+  const normalStyle = {
+    lineWidth: 2,
+    strokeStyle: "#22d3ee",
+    fillStyle: "#22d3ee",
+  };
+
+  const highlightStyle = {
+    lineWidth: 4,
+    strokeStyle: "#fbbf24",
+    fillStyle: "#fbbf24",
+  };
+
   context.font = "14px Segoe UI";
 
   entry.records.forEach((record, index) => {
-    if (record.type === "segment") {
-      drawSegmentRecord(context, record, frame);
+    const isHighlighted = index === state.highlightedRecordIndex;
+
+    if (isHighlighted) {
+      context.lineWidth = highlightStyle.lineWidth;
+      context.strokeStyle = highlightStyle.strokeStyle;
+      context.fillStyle = highlightStyle.fillStyle;
     } else {
-      drawDetectRecord(context, record, frame);
+      context.lineWidth = normalStyle.lineWidth;
+      context.strokeStyle = normalStyle.strokeStyle;
+      context.fillStyle = normalStyle.fillStyle;
     }
-    context.fillText(`#${index} c${record.classId}`, frame.x + 10, frame.y + 22 + index * 18);
+
+    if (record.type === "segment") {
+      drawSegmentRecord(context, record, frame, isHighlighted);
+    } else {
+      drawDetectRecord(context, record, frame, isHighlighted);
+    }
+
+    if (isHighlighted) {
+      context.fillStyle = highlightStyle.fillStyle;
+      context.font = "bold 16px Segoe UI";
+      context.fillText(`★ #${index} c${record.classId} (HIGHLIGHTED)`, frame.x + 10, frame.y + 30);
+      context.font = "14px Segoe UI";
+    } else {
+      context.fillText(`#${index} c${record.classId}`, frame.x + 10, frame.y + 22 + index * 18);
+    }
   });
+
+  if (state.highlightedLineNumber !== null && state.highlightedRecordIndex === null) {
+    const issues = getIssuesFromLineNumber(entry, state.highlightedLineNumber);
+    if (issues.length > 0) {
+      context.fillStyle = "#fca5a5";
+      context.font = "bold 14px Segoe UI";
+      const issueText = `Line ${state.highlightedLineNumber}: ${issues.map((i) => i.code).join(", ")}`;
+      context.fillText(issueText, frame.x + 10, frame.y + frame.height - 20);
+    }
+  }
 
   elements.previewImageMeta.textContent = `${entry.imageInfo.width} x ${entry.imageInfo.height}`;
 }
@@ -466,8 +750,13 @@ function renderPreview() {
 function selectEntry(entryKey) {
   state.selectedEntryKey = entryKey;
   state.previewImage = null;
+  state.selectedIssue = null;
+  state.highlightedRecordIndex = null;
+  state.highlightedLineNumber = null;
   renderDatasetList();
+  renderIssueList();
   renderPreview();
+  renderLabelTextList();
 }
 
 function buildReportPayload() {
@@ -523,6 +812,7 @@ async function analyzeDataset() {
   renderDatasetList();
   renderIssueList();
   renderPreview();
+  renderLabelTextList();
 
   if (state.issues.length) {
     setStatus(`Analysis complete. ${state.issues.length} issues found.`, "warn");
@@ -571,8 +861,44 @@ elements.fileList.addEventListener("click", (event) => {
   selectEntry(trigger.dataset.entryKey);
 });
 
+elements.issueList.addEventListener("click", (event) => {
+  const issueItem = event.target.closest("[data-issue-index]");
+  if (!issueItem) {
+    return;
+  }
+
+  const issueIndex = parseInt(issueItem.dataset.issueIndex, 10);
+  if (!isNaN(issueIndex)) {
+    selectIssue(issueIndex);
+  }
+});
+
+document.addEventListener("click", (event) => {
+  const labelLine = event.target.closest(".label-line[data-line-number]");
+  if (!labelLine) {
+    return;
+  }
+
+  const lineNumber = parseInt(labelLine.dataset.lineNumber, 10);
+  if (!isNaN(lineNumber)) {
+    selectLabelLine(lineNumber);
+  }
+});
+
+if (elements.previewTabs) {
+  elements.previewTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const tabId = tab.dataset.tab;
+      if (tabId) {
+        switchPreviewTab(tabId);
+      }
+    });
+  });
+}
+
 syncTaskTypeUI();
 updateMetrics();
 renderDatasetList();
 renderIssueList();
 renderPreview();
+renderLabelTextList();

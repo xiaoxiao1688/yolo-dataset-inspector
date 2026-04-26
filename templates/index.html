@@ -114,8 +114,25 @@
             <h2>Preview</h2>
             <p id="preview-name" class="panel-hint">Nothing selected.</p>
           </div>
-          <div class="preview-stage">
-            <canvas id="preview-canvas" width="960" height="640"></canvas>
+          <div class="preview-tabs">
+            <button type="button" class="preview-tab active" data-tab="canvas">Image Preview</button>
+            <button type="button" class="preview-tab" data-tab="labels">Label Text</button>
+          </div>
+          <div class="preview-content active" id="preview-canvas-tab">
+            <div class="preview-stage">
+              <canvas id="preview-canvas" width="960" height="640"></canvas>
+            </div>
+          </div>
+          <div class="preview-content" id="preview-labels-tab">
+            <div class="label-text-stage">
+              <div class="label-text-header">
+                <span class="label-line-num">Line</span>
+                <span class="label-text-title">Label Content</span>
+              </div>
+              <div id="label-text-list" class="label-text-list">
+                <div class="empty-state">Select a dataset item to view labels.</div>
+              </div>
+            </div>
           </div>
           <div class="preview-meta">
             <div>
