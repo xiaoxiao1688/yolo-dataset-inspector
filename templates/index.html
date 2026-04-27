@@ -102,7 +102,31 @@
         <article class="panel issues-panel">
           <div class="panel-head">
             <h2>Issue Feed</h2>
-            <p id="issue-hint" class="panel-hint">No issues reported yet.</p>
+            <div class="panel-head-actions">
+              <p id="issue-hint" class="panel-hint">No issues reported yet.</p>
+              <button id="export-filtered-button" class="ghost small" type="button" disabled>Export filtered</button>
+            </div>
+          </div>
+          <div class="issue-filters">
+            <div class="filter-group">
+              <label class="filter-label">Severity</label>
+              <select id="severity-filter">
+                <option value="all">All</option>
+                <option value="error">Error</option>
+                <option value="warning">Warning</option>
+              </select>
+            </div>
+            <div class="filter-group">
+              <label class="filter-label">Issue Code</label>
+              <div class="code-select-wrapper" id="code-select-wrapper">
+                <input type="text" id="code-filter" placeholder="Filter by code..." autocomplete="off" />
+                <div class="code-dropdown" id="code-dropdown"></div>
+              </div>
+            </div>
+            <div class="filter-group filter-checkbox">
+              <input type="checkbox" id="selected-file-only" />
+              <label for="selected-file-only" class="filter-label">Selected file only</label>
+            </div>
           </div>
           <ul id="issue-list" class="stack-list">
             <li class="empty-state">Dataset issues will appear here.</li>
@@ -114,8 +138,25 @@
             <h2>Preview</h2>
             <p id="preview-name" class="panel-hint">Nothing selected.</p>
           </div>
-          <div class="preview-stage">
-            <canvas id="preview-canvas" width="960" height="640"></canvas>
+          <div class="preview-tabs">
+            <button type="button" class="preview-tab active" data-tab="canvas">Image Preview</button>
+            <button type="button" class="preview-tab" data-tab="labels">Label Text</button>
+          </div>
+          <div class="preview-content active" id="preview-canvas-tab">
+            <div class="preview-stage">
+              <canvas id="preview-canvas" width="960" height="640"></canvas>
+            </div>
+          </div>
+          <div class="preview-content" id="preview-labels-tab">
+            <div class="label-text-stage">
+              <div class="label-text-header">
+                <span class="label-line-num">Line</span>
+                <span class="label-text-title">Label Content</span>
+              </div>
+              <div id="label-text-list" class="label-text-list">
+                <div class="empty-state">Select a dataset item to view labels.</div>
+              </div>
+            </div>
           </div>
           <div class="preview-meta">
             <div>
