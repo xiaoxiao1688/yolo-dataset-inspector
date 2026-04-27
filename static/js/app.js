@@ -10,16 +10,29 @@ const elements = {
   issueHint: document.querySelector("#issue-hint"),
   issueList: document.querySelector("#issue-list"),
   labelInput: document.querySelector("#label-input"),
+  labelTextList: document.querySelector("#label-text-list"),
   metricImages: document.querySelector("#metric-images"),
   metricIssues: document.querySelector("#metric-issues"),
   metricLabels: document.querySelector("#metric-labels"),
   metricPairs: document.querySelector("#metric-pairs"),
   previewCanvas: document.querySelector("#preview-canvas"),
+  previewCanvasTab: document.querySelector("#preview-canvas-tab"),
   previewImageMeta: document.querySelector("#preview-image-meta"),
   previewLabelMeta: document.querySelector("#preview-label-meta"),
+  previewLabelsTab: document.querySelector("#preview-labels-tab"),
   previewName: document.querySelector("#preview-name"),
+  previewTabs: document.querySelectorAll(".preview-tab"),
+  previewContents: document.querySelectorAll(".preview-content"),
   statusLine: document.querySelector("#status-line"),
   taskType: document.querySelector("#task-type"),
+  // Filter elements
+  severityFilter: document.querySelector("#severity-filter"),
+  codeFilter: document.querySelector("#code-filter"),
+  selectedFileOnly: document.querySelector("#selected-file-only"),
+  // New elements for code dropdown and export
+  exportFilteredButton: document.querySelector("#export-filtered-button"),
+  codeSelectWrapper: document.querySelector("#code-select-wrapper"),
+  codeDropdown: document.querySelector("#code-dropdown"),
 };
 
 const state = {
@@ -29,8 +42,19 @@ const state = {
   labelFiles: [],
   previewImage: null,
   selectedEntryKey: null,
+  selectedIssue: null,
+  highlightedRecordIndex: null,
+  highlightedLineNumber: null,
   taskType: "detect",
 };
+
+function getIssueFilterState() {
+  return {
+    severity: elements.severityFilter ? elements.severityFilter.value : "all",
+    codeFilter: elements.codeFilter ? elements.codeFilter.value.trim().toLowerCase() : "",
+    selectedFileOnly: elements.selectedFileOnly ? elements.selectedFileOnly.checked : false,
+  };
+}
 
 function setStatus(message, type = "info") {
   elements.statusLine.textContent = message;
@@ -54,6 +78,162 @@ function createIssue(level, code, message, entryKey = null, line = null) {
 
 function getIssueWeight(level) {
   return level === "error" ? 2 : 1;
+}
+
+function getUniqueIssueCodes(issues) {
+  const codeCounts = new Map();
+  issues.forEach((issue) => {
+    const count = codeCounts.get(issue.code) || 0;
+    codeCounts.set(issue.code, count + 1);
+  });
+  return Array.from(codeCounts.entries())
+    .map(([code, count]) => ({ code, count }))
+    .sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
+}
+
+function renderCodeDropdown() {
+  if (!elements.codeDropdown) {
+    return;
+  }
+
+  const filteredIssues = getFilteredIssues();
+  const issuesToUse = filteredIssues.length > 0
+    ? filteredIssues.map(item => item.issue)
+    : state.issues;
+
+  const uniqueCodes = getUniqueIssueCodes(issuesToUse);
+  const searchValue = elements.codeFilter ? elements.codeFilter.value.trim().toLowerCase() : "";
+
+  let filteredCodes = uniqueCodes;
+  if (searchValue) {
+    filteredCodes = uniqueCodes.filter(({ code }) =>
+      code.toLowerCase().includes(searchValue)
+    );
+  }
+
+  if (filteredCodes.length === 0) {
+    elements.codeDropdown.innerHTML = '<div class="code-dropdown-item">No matching codes</div>';
+    return;
+  }
+
+  elements.codeDropdown.innerHTML = `
+    <div class="code-dropdown-item" data-code="">
+      <span>All codes</span>
+      <span class="code-count">${state.issues.length}</span>
+    </div>
+    ${filteredCodes
+      .map(({ code, count }) => {
+        const isSelected = searchValue === code.toLowerCase();
+        const selectedClass = isSelected ? " selected" : "";
+        return `
+          <div class="code-dropdown-item${selectedClass}" data-code="${code}">
+            <span>${code}</span>
+            <span class="code-count">${count}</span>
+          </div>
+        `;
+      })
+      .join("")}
+  `;
+}
+
+function showCodeDropdown() {
+  if (!elements.codeDropdown) {
+    return;
+  }
+  renderCodeDropdown();
+  elements.codeDropdown.classList.add("show");
+}
+
+function hideCodeDropdown() {
+  if (!elements.codeDropdown) {
+    return;
+  }
+  elements.codeDropdown.classList.remove("show");
+}
+
+function toggleCodeDropdown() {
+  if (!elements.codeDropdown) {
+    return;
+  }
+  if (elements.codeDropdown.classList.contains("show")) {
+    hideCodeDropdown();
+  } else {
+    showCodeDropdown();
+  }
+}
+
+function getFilteredIssues() {
+  const { severity, codeFilter, selectedFileOnly } = getIssueFilterState();
+
+  return state.issues
+    .map((issue, originalIndex) => ({ issue, originalIndex }))
+    .filter(({ issue }) => {
+      if (severity !== "all" && issue.level !== severity) {
+        return false;
+      }
+
+      if (codeFilter && !issue.code.toLowerCase().includes(codeFilter)) {
+        return false;
+      }
+
+      if (selectedFileOnly && issue.entryKey !== state.selectedEntryKey) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort((a, b) => getIssueWeight(b.issue.level) - getIssueWeight(a.issue.level));
+}
+
+function describeIssueFilterSummary() {
+  const { severity, codeFilter, selectedFileOnly } = getIssueFilterState();
+  const parts = [];
+
+  if (severity !== "all") {
+    parts.push(severity);
+  }
+
+  if (codeFilter) {
+    parts.push(`code:${codeFilter}`);
+  }
+
+  if (selectedFileOnly) {
+    parts.push(state.selectedEntryKey ? `file:${state.selectedEntryKey}` : "selected file");
+  }
+
+  return parts.length ? parts.join(" | ") : "all issues";
+}
+
+function refreshIssueFeedFeedback() {
+  const filteredIssues = getFilteredIssues();
+  const totalIssues = state.issues.length;
+  const filterSummary = describeIssueFilterSummary();
+
+  if (totalIssues === 0) {
+    elements.issueHint.textContent = "No issues reported yet.";
+    return;
+  }
+
+  if (filteredIssues.length === totalIssues && filterSummary === "all issues") {
+    elements.issueHint.textContent = `${totalIssues} issues found. Highest severity first.`;
+    return;
+  }
+
+  elements.issueHint.textContent = `Showing ${filteredIssues.length} of ${totalIssues} issues for ${filterSummary}.`;
+}
+
+function updateFilterStatus() {
+  if (!state.datasetEntries.length) {
+    return;
+  }
+
+  const filteredCount = getFilteredIssues().length;
+  const filterSummary = describeIssueFilterSummary();
+  const message = filteredCount
+    ? `Issue filter active: ${filterSummary}. ${filteredCount} issues shown.`
+    : `Issue filter active: ${filterSummary}. No matching issues.`;
+
+  setStatus(message, filteredCount === 0 && state.issues.length > 0 ? "warn" : "info");
 }
 
 async function loadImageInfo(file) {
@@ -168,19 +348,33 @@ function parseSegmentLine(parts, classNamesLength, lineNumber) {
 function parseLabelText(text, taskType, classNamesLength, entryKey) {
   const records = [];
   const issues = [];
-  const lines = String(text || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  const rawLines = String(text || "").split(/\r?\n/);
+  const lineToRecordMap = new Map();
+  const lineToIssueMap = new Map();
+  let recordIndex = 0;
 
-  if (!lines.length) {
+  if (!rawLines.some((line) => line.trim())) {
     issues.push(createIssue("warning", "empty_label", "Label file is empty.", entryKey));
-    return { records, issues };
+    return {
+      records,
+      issues,
+      rawText: text,
+      rawLines,
+      lineToRecordMap,
+      lineToIssueMap,
+    };
   }
 
-  lines.forEach((line, index) => {
-    const lineNumber = index + 1;
-    const parts = line.split(/\s+/);
+  for (let rawLineIndex = 0; rawLineIndex < rawLines.length; rawLineIndex++) {
+    const rawLine = rawLines[rawLineIndex];
+    const trimmedLine = rawLine.trim();
+    const lineNumber = rawLineIndex + 1;
+
+    if (!trimmedLine) {
+      continue;
+    }
+
+    const parts = trimmedLine.split(/\s+/);
     const result =
       taskType === "segment"
         ? parseSegmentLine(parts, classNamesLength, lineNumber)
@@ -188,14 +382,29 @@ function parseLabelText(text, taskType, classNamesLength, entryKey) {
 
     if (result.issue) {
       result.issue.entryKey = entryKey;
+      result.issue.rawLineText = rawLine;
       issues.push(result.issue);
-      return;
+
+      const existingIssues = lineToIssueMap.get(lineNumber) || [];
+      existingIssues.push(result.issue);
+      lineToIssueMap.set(lineNumber, existingIssues);
+    } else if (result.record) {
+      result.record.rawLineNumber = lineNumber;
+      result.record.rawLineText = rawLine;
+      records.push(result.record);
+      lineToRecordMap.set(lineNumber, recordIndex);
+      recordIndex++;
     }
+  }
 
-    records.push(result.record);
-  });
-
-  return { records, issues };
+  return {
+    records,
+    issues,
+    rawText: text,
+    rawLines,
+    lineToRecordMap,
+    lineToIssueMap,
+  };
 }
 
 function collectDuplicateIssues(files, kind) {
@@ -256,6 +465,10 @@ async function buildDatasetEntries() {
       imageInfo: null,
       records: [],
       issues: [],
+      labelRawText: null,
+      labelRawLines: [],
+      lineToRecordMap: new Map(),
+      lineToIssueMap: new Map(),
     };
 
     if (!imageFile) {
@@ -279,6 +492,10 @@ async function buildDatasetEntries() {
       const parsed = parseLabelText(labelText, state.taskType, classNames.length, key);
       entry.records = parsed.records;
       entry.issues.push(...parsed.issues);
+      entry.labelRawText = parsed.rawText;
+      entry.labelRawLines = parsed.rawLines;
+      entry.lineToRecordMap = parsed.lineToRecordMap;
+      entry.lineToIssueMap = parsed.lineToIssueMap;
     }
 
     issues.push(...entry.issues);
@@ -286,20 +503,6 @@ async function buildDatasetEntries() {
   }
 
   return { entries, issues };
-}
-
-function updateMetrics() {
-  const matchedPairs = state.datasetEntries.filter((entry) => entry.imageFile && entry.labelFile).length;
-  elements.metricImages.textContent = String(state.imageFiles.length);
-  elements.metricLabels.textContent = String(state.labelFiles.length);
-  elements.metricPairs.textContent = String(matchedPairs);
-  elements.metricIssues.textContent = String(state.issues.length);
-  elements.inventoryHint.textContent = state.datasetEntries.length
-    ? `${state.datasetEntries.length} files tracked in the current dataset view.`
-    : "No analysis yet.";
-  elements.issueHint.textContent = state.issues.length
-    ? `${state.issues.length} issues found. Highest severity first.`
-    : "No issues reported yet.";
 }
 
 function renderDatasetList() {
@@ -334,20 +537,48 @@ function renderDatasetList() {
     .join("");
 }
 
+function updateMetrics() {
+  const matchedPairs = state.datasetEntries.filter((entry) => entry.imageFile && entry.labelFile).length;
+  elements.metricImages.textContent = String(state.imageFiles.length);
+  elements.metricLabels.textContent = String(state.labelFiles.length);
+  elements.metricPairs.textContent = String(matchedPairs);
+  elements.metricIssues.textContent = String(state.issues.length);
+  elements.inventoryHint.textContent = state.datasetEntries.length
+    ? `${state.datasetEntries.length} files tracked in the current dataset view.`
+    : "No analysis yet.";
+  refreshIssueFeedFeedback();
+}
+
 function renderIssueList() {
-  if (!state.issues.length) {
-    elements.issueList.innerHTML = '<li class="empty-state">Dataset issues will appear here.</li>';
+  const filteredIssues = getFilteredIssues();
+
+  if (!filteredIssues.length) {
+    if (state.issues.length === 0) {
+      elements.issueList.innerHTML = '<li class="empty-state">Dataset issues will appear here.</li>';
+    } else if (elements.selectedFileOnly && elements.selectedFileOnly.checked && !state.selectedEntryKey) {
+      elements.issueList.innerHTML = '<li class="empty-state">Select a dataset item to filter issues by file.</li>';
+    } else {
+      elements.issueList.innerHTML = '<li class="empty-state">No issues match the current filter.</li>';
+    }
     return;
   }
 
-  const sortedIssues = [...state.issues].sort((left, right) => getIssueWeight(right.level) - getIssueWeight(left.level));
-  elements.issueList.innerHTML = sortedIssues
-    .map((issue) => {
-      const itemClass = issue.level === "error" ? "stack-item issue-error" : "stack-item issue-warning";
+  elements.issueList.innerHTML = filteredIssues
+    .map(({ issue, originalIndex }) => {
+      const baseClass = issue.level === "error" ? "issue-error" : "issue-warning";
+      const selectedClass = state.selectedIssue === originalIndex ? " selected" : "";
+      const itemClass = `stack-item ${baseClass} issue-item-clickable${selectedClass}`;
+
       const lineMeta = issue.line ? ` | line ${issue.line}` : "";
       const keyMeta = issue.entryKey ? ` | ${issue.entryKey}` : "";
+
+      const dataAttrs = [];
+      if (issue.entryKey) dataAttrs.push(`data-entry-key="${issue.entryKey}"`);
+      if (issue.line) dataAttrs.push(`data-line="${issue.line}"`);
+      dataAttrs.push(`data-issue-index="${originalIndex}"`);
+
       return `
-        <li class="${itemClass}">
+        <li class="${itemClass}" ${dataAttrs.join(" ")}>
           <p class="issue-title">${issue.code}</p>
           <p class="issue-meta">${issue.message}${keyMeta}${lineMeta}</p>
         </li>
@@ -363,6 +594,178 @@ function getSelectedEntry() {
   return state.datasetEntries.find((entry) => entry.key === state.selectedEntryKey) || null;
 }
 
+function getRecordIndexFromLineNumber(entry, lineNumber) {
+  if (!entry || !entry.lineToRecordMap) {
+    return null;
+  }
+  const recordIndex = entry.lineToRecordMap.get(lineNumber);
+  return recordIndex !== undefined ? recordIndex : null;
+}
+
+function getIssuesFromLineNumber(entry, lineNumber) {
+  if (!entry || !entry.lineToIssueMap) {
+    return [];
+  }
+  return entry.lineToIssueMap.get(lineNumber) || [];
+}
+
+function selectIssue(issueIndex) {
+  if (issueIndex === null || issueIndex === undefined || issueIndex < 0 || issueIndex >= state.issues.length) {
+    state.selectedIssue = null;
+    state.highlightedRecordIndex = null;
+    state.highlightedLineNumber = null;
+    renderIssueList();
+    renderPreview();
+    renderLabelTextList();
+    return;
+  }
+
+  const issue = state.issues[issueIndex];
+  state.selectedIssue = issueIndex;
+
+  if (issue.entryKey) {
+    if (state.selectedEntryKey !== issue.entryKey) {
+      state.selectedEntryKey = issue.entryKey;
+      state.previewImage = null;
+      renderDatasetList();
+    }
+
+    if (issue.line !== undefined && issue.line !== null) {
+      state.highlightedLineNumber = issue.line;
+
+      const entry = getSelectedEntry();
+      if (entry) {
+        const recordIndex = getRecordIndexFromLineNumber(entry, issue.line);
+        state.highlightedRecordIndex = recordIndex;
+
+        switchPreviewTab("labels");
+      }
+    } else {
+      state.highlightedLineNumber = null;
+      state.highlightedRecordIndex = null;
+    }
+  } else {
+    state.highlightedLineNumber = null;
+    state.highlightedRecordIndex = null;
+  }
+
+  setStatus(`Selected issue: ${issue.code}${issue.line ? ` at line ${issue.line}` : ""}`);
+  renderIssueList();
+  renderPreview();
+  renderLabelTextList();
+}
+
+function selectLabelLine(lineNumber) {
+  const entry = getSelectedEntry();
+  if (!entry) {
+    return;
+  }
+
+  state.highlightedLineNumber = lineNumber;
+
+  const recordIndex = getRecordIndexFromLineNumber(entry, lineNumber);
+  state.highlightedRecordIndex = recordIndex;
+
+  const issues = getIssuesFromLineNumber(entry, lineNumber);
+  if (issues.length > 0) {
+    for (let i = 0; i < state.issues.length; i++) {
+      if (state.issues[i] === issues[0]) {
+        state.selectedIssue = i;
+        break;
+      }
+    }
+  } else {
+    state.selectedIssue = null;
+  }
+
+  if (recordIndex !== null) {
+    switchPreviewTab("canvas");
+  }
+
+  renderIssueList();
+  renderPreview();
+  renderLabelTextList();
+}
+
+function switchPreviewTab(tabId) {
+  if (!elements.previewTabs || !elements.previewContents) {
+    return;
+  }
+
+  elements.previewTabs.forEach((tab) => {
+    if (tab.dataset.tab === tabId) {
+      tab.classList.add("active");
+    } else {
+      tab.classList.remove("active");
+    }
+  });
+
+  elements.previewContents.forEach((content) => {
+    if (tabId === "canvas" && content.id === "preview-canvas-tab") {
+      content.classList.add("active");
+    } else if (tabId === "labels" && content.id === "preview-labels-tab") {
+      content.classList.add("active");
+    } else {
+      content.classList.remove("active");
+    }
+  });
+}
+
+function renderLabelTextList() {
+  if (!elements.labelTextList) {
+    return;
+  }
+
+  const entry = getSelectedEntry();
+  if (!entry || !entry.labelRawLines || entry.labelRawLines.length === 0) {
+    elements.labelTextList.innerHTML = '<div class="empty-state">Select a dataset item with labels to view.</div>';
+    return;
+  }
+
+  const html = entry.labelRawLines
+    .map((line, index) => {
+      const lineNumber = index + 1;
+      const isHighlighted = state.highlightedLineNumber === lineNumber;
+      const issues = getIssuesFromLineNumber(entry, lineNumber);
+      const hasIssue = issues.length > 0;
+      const hasError = issues.some((i) => i.level === "error");
+      const recordIndex = getRecordIndexFromLineNumber(entry, lineNumber);
+      const isParsedRecord = recordIndex !== null;
+
+      let lineClasses = "label-line";
+      if (isHighlighted) lineClasses += " selected";
+      if (hasError) lineClasses += " has-error";
+      else if (hasIssue) lineClasses += " has-warning";
+
+      let statusHtml = "";
+      if (hasIssue) {
+        const issueType = hasError ? "error" : "warning";
+        const issueCodes = issues.map((i) => i.code).join(", ");
+        statusHtml = `<span class="label-line-status ${issueType}">${issueCodes}</span>`;
+      } else if (isParsedRecord) {
+        statusHtml = `<span class="label-line-status" style="color: #86efac;">record #${recordIndex}</span>`;
+      }
+
+      const displayLine = line || " ";
+
+      return `
+        <div class="${lineClasses}" data-line-number="${lineNumber}">
+          <span class="label-line-number">${lineNumber}</span>
+          <span class="label-line-content">${escapeHtml(displayLine)}${statusHtml}</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  elements.labelTextList.innerHTML = html;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
 function fitImageToCanvas(imageWidth, imageHeight, canvasWidth, canvasHeight) {
   const scale = Math.min(canvasWidth / imageWidth, canvasHeight / imageHeight);
   const width = imageWidth * scale;
@@ -376,15 +779,24 @@ function fitImageToCanvas(imageWidth, imageHeight, canvasWidth, canvasHeight) {
   };
 }
 
-function drawDetectRecord(context, record, frame) {
+function drawDetectRecord(context, record, frame, isHighlighted = false) {
   const boxWidth = record.width * frame.width;
   const boxHeight = record.height * frame.height;
   const x = frame.x + (record.xCenter * frame.width - boxWidth / 2);
   const y = frame.y + (record.yCenter * frame.height - boxHeight / 2);
-  context.strokeRect(x, y, boxWidth, boxHeight);
+
+  if (isHighlighted) {
+    context.setLineDash([6, 4]);
+    context.lineWidth = 4;
+    context.strokeRect(x, y, boxWidth, boxHeight);
+    context.setLineDash([]);
+    context.lineWidth = 2;
+  } else {
+    context.strokeRect(x, y, boxWidth, boxHeight);
+  }
 }
 
-function drawSegmentRecord(context, record, frame) {
+function drawSegmentRecord(context, record, frame, isHighlighted = false) {
   if (!record.points.length) {
     return;
   }
@@ -400,7 +812,16 @@ function drawSegmentRecord(context, record, frame) {
     }
   });
   context.closePath();
-  context.stroke();
+
+  if (isHighlighted) {
+    context.setLineDash([6, 4]);
+    context.lineWidth = 4;
+    context.stroke();
+    context.setLineDash([]);
+    context.lineWidth = 2;
+  } else {
+    context.stroke();
+  }
 }
 
 function renderPreview() {
@@ -446,19 +867,59 @@ function renderPreview() {
 
   const frame = fitImageToCanvas(image.naturalWidth, image.naturalHeight, canvas.width, canvas.height);
   context.drawImage(image, frame.x, frame.y, frame.width, frame.height);
-  context.lineWidth = 2;
-  context.strokeStyle = "#22d3ee";
-  context.fillStyle = "#22d3ee";
+
+  const normalStyle = {
+    lineWidth: 2,
+    strokeStyle: "#22d3ee",
+    fillStyle: "#22d3ee",
+  };
+
+  const highlightStyle = {
+    lineWidth: 4,
+    strokeStyle: "#fbbf24",
+    fillStyle: "#fbbf24",
+  };
+
   context.font = "14px Segoe UI";
 
   entry.records.forEach((record, index) => {
-    if (record.type === "segment") {
-      drawSegmentRecord(context, record, frame);
+    const isHighlighted = index === state.highlightedRecordIndex;
+
+    if (isHighlighted) {
+      context.lineWidth = highlightStyle.lineWidth;
+      context.strokeStyle = highlightStyle.strokeStyle;
+      context.fillStyle = highlightStyle.fillStyle;
     } else {
-      drawDetectRecord(context, record, frame);
+      context.lineWidth = normalStyle.lineWidth;
+      context.strokeStyle = normalStyle.strokeStyle;
+      context.fillStyle = normalStyle.fillStyle;
     }
-    context.fillText(`#${index} c${record.classId}`, frame.x + 10, frame.y + 22 + index * 18);
+
+    if (record.type === "segment") {
+      drawSegmentRecord(context, record, frame, isHighlighted);
+    } else {
+      drawDetectRecord(context, record, frame, isHighlighted);
+    }
+
+    if (isHighlighted) {
+      context.fillStyle = highlightStyle.fillStyle;
+      context.font = "bold 16px Segoe UI";
+      context.fillText(`[HIGHLIGHTED] #${index} c${record.classId}`, frame.x + 10, frame.y + 30);
+      context.font = "14px Segoe UI";
+    } else {
+      context.fillText(`#${index} c${record.classId}`, frame.x + 10, frame.y + 22 + index * 18);
+    }
   });
+
+  if (state.highlightedLineNumber !== null && state.highlightedRecordIndex === null) {
+    const issues = getIssuesFromLineNumber(entry, state.highlightedLineNumber);
+    if (issues.length > 0) {
+      context.fillStyle = "#fca5a5";
+      context.font = "bold 14px Segoe UI";
+      const issueText = `Line ${state.highlightedLineNumber}: ${issues.map((i) => i.code).join(", ")}`;
+      context.fillText(issueText, frame.x + 10, frame.y + frame.height - 20);
+    }
+  }
 
   elements.previewImageMeta.textContent = `${entry.imageInfo.width} x ${entry.imageInfo.height}`;
 }
@@ -466,8 +927,17 @@ function renderPreview() {
 function selectEntry(entryKey) {
   state.selectedEntryKey = entryKey;
   state.previewImage = null;
+  state.selectedIssue = null;
+  state.highlightedRecordIndex = null;
+  state.highlightedLineNumber = null;
+  updateMetrics();
   renderDatasetList();
+  renderIssueList();
   renderPreview();
+  renderLabelTextList();
+  if (elements.selectedFileOnly && elements.selectedFileOnly.checked) {
+    updateFilterStatus();
+  }
 }
 
 function buildReportPayload() {
@@ -490,6 +960,52 @@ function buildReportPayload() {
     })),
     issues: state.issues,
   };
+}
+
+function buildFilteredReportPayload() {
+  const filteredIssues = getFilteredIssues();
+  const filterSummary = describeIssueFilterSummary();
+
+  const issueList = filteredIssues.map(({ issue }) => issue);
+
+  const affectedEntryKeys = new Set(
+    issueList.filter((issue) => issue.entryKey).map((issue) => issue.entryKey)
+  );
+
+  const affectedEntries = state.datasetEntries
+    .filter((entry) => affectedEntryKeys.has(entry.key))
+    .map((entry) => ({
+      key: entry.key,
+      imageName: entry.imageFile?.name || null,
+      labelName: entry.labelFile?.name || null,
+      parsedRecordCount: entry.records.length,
+      issues: entry.issues.filter((issue) =>
+        issueList.some((fi) => fi === issue)
+      ),
+    }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    taskType: state.taskType,
+    classNames: parseClassNames(),
+    filterApplied: filterSummary,
+    summary: {
+      totalIssueCount: state.issues.length,
+      filteredIssueCount: filteredIssues.length,
+      affectedEntryCount: affectedEntries.length,
+    },
+    entries: affectedEntries,
+    issues: issueList,
+  };
+}
+
+function updateExportButtonState() {
+  if (!elements.exportFilteredButton) {
+    return;
+  }
+
+  const filteredIssues = getFilteredIssues();
+  elements.exportFilteredButton.disabled = filteredIssues.length === 0;
 }
 
 function downloadJson(filename, payload) {
@@ -523,6 +1039,8 @@ async function analyzeDataset() {
   renderDatasetList();
   renderIssueList();
   renderPreview();
+  renderLabelTextList();
+  updateExportButtonState();
 
   if (state.issues.length) {
     setStatus(`Analysis complete. ${state.issues.length} issues found.`, "warn");
@@ -571,8 +1089,132 @@ elements.fileList.addEventListener("click", (event) => {
   selectEntry(trigger.dataset.entryKey);
 });
 
+elements.issueList.addEventListener("click", (event) => {
+  const issueItem = event.target.closest("[data-issue-index]");
+  if (!issueItem) {
+    return;
+  }
+
+  const issueIndex = parseInt(issueItem.dataset.issueIndex, 10);
+  if (!isNaN(issueIndex)) {
+    selectIssue(issueIndex);
+  }
+});
+
+document.addEventListener("click", (event) => {
+  const labelLine = event.target.closest(".label-line[data-line-number]");
+  if (!labelLine) {
+    return;
+  }
+
+  const lineNumber = parseInt(labelLine.dataset.lineNumber, 10);
+  if (!isNaN(lineNumber)) {
+    selectLabelLine(lineNumber);
+  }
+});
+
+if (elements.previewTabs) {
+  elements.previewTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const tabId = tab.dataset.tab;
+      if (tabId) {
+        switchPreviewTab(tabId);
+      }
+    });
+  });
+}
+
+// Filter event listeners
+if (elements.severityFilter) {
+  elements.severityFilter.addEventListener("change", () => {
+    updateMetrics();
+    renderIssueList();
+    updateFilterStatus();
+    updateExportButtonState();
+  });
+}
+
+if (elements.codeFilter) {
+  elements.codeFilter.addEventListener("input", () => {
+    updateMetrics();
+    renderIssueList();
+    updateFilterStatus();
+    updateExportButtonState();
+    if (elements.codeDropdown && elements.codeDropdown.classList.contains("show")) {
+      renderCodeDropdown();
+    }
+  });
+
+  elements.codeFilter.addEventListener("focus", () => {
+    showCodeDropdown();
+  });
+
+  elements.codeFilter.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      hideCodeDropdown();
+    }
+  });
+}
+
+if (elements.selectedFileOnly) {
+  elements.selectedFileOnly.addEventListener("change", () => {
+    updateMetrics();
+    renderIssueList();
+    updateFilterStatus();
+    updateExportButtonState();
+  });
+}
+
+// Code dropdown click listener
+if (elements.codeDropdown) {
+  elements.codeDropdown.addEventListener("click", (event) => {
+    const item = event.target.closest(".code-dropdown-item");
+    if (!item) {
+      return;
+    }
+
+    const code = item.dataset.code;
+    if (code === undefined) {
+      return;
+    }
+
+    if (elements.codeFilter) {
+      elements.codeFilter.value = code;
+    }
+
+    hideCodeDropdown();
+    updateMetrics();
+    renderIssueList();
+    updateFilterStatus();
+    updateExportButtonState();
+  });
+}
+
+// Close dropdown when clicking outside
+document.addEventListener("click", (event) => {
+  if (
+    elements.codeSelectWrapper &&
+    !elements.codeSelectWrapper.contains(event.target)
+  ) {
+    hideCodeDropdown();
+  }
+});
+
+// Export filtered button listener
+if (elements.exportFilteredButton) {
+  elements.exportFilteredButton.addEventListener("click", () => {
+    const payload = buildFilteredReportPayload();
+    const filterSummary = describeIssueFilterSummary();
+    const safeFilterName = filterSummary.replace(/[^a-z0-9]/gi, "_").toLowerCase();
+    downloadJson(`yolo-qa-filtered-${safeFilterName}.json`, payload);
+    setStatus(`Exported ${payload.issues.length} filtered issues.`);
+  });
+}
+
 syncTaskTypeUI();
 updateMetrics();
 renderDatasetList();
 renderIssueList();
 renderPreview();
+renderLabelTextList();
+updateExportButtonState();
