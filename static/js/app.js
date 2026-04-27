@@ -727,7 +727,7 @@ function renderPreview() {
     if (isHighlighted) {
       context.fillStyle = highlightStyle.fillStyle;
       context.font = "bold 16px Segoe UI";
-      context.fillText(`★ #${index} c${record.classId} (HIGHLIGHTED)`, frame.x + 10, frame.y + 30);
+      context.fillText(`[HIGHLIGHTED] #${index} c${record.classId}`, frame.x + 10, frame.y + 30);
       context.font = "14px Segoe UI";
     } else {
       context.fillText(`#${index} c${record.classId}`, frame.x + 10, frame.y + 22 + index * 18);
