@@ -25,6 +25,10 @@ const elements = {
   previewContents: document.querySelectorAll(".preview-content"),
   statusLine: document.querySelector("#status-line"),
   taskType: document.querySelector("#task-type"),
+  // Filter elements
+  severityFilter: document.querySelector("#severity-filter"),
+  codeFilter: document.querySelector("#code-filter"),
+  selectedFileOnly: document.querySelector("#selected-file-only"),
 };
 
 const state = {
@@ -39,6 +43,14 @@ const state = {
   highlightedLineNumber: null,
   taskType: "detect",
 };
+
+function getIssueFilterState() {
+  return {
+    severity: elements.severityFilter ? elements.severityFilter.value : "all",
+    codeFilter: elements.codeFilter ? elements.codeFilter.value.trim().toLowerCase() : "",
+    selectedFileOnly: elements.selectedFileOnly ? elements.selectedFileOnly.checked : false,
+  };
+}
 
 function setStatus(message, type = "info") {
   elements.statusLine.textContent = message;
@@ -62,6 +74,80 @@ function createIssue(level, code, message, entryKey = null, line = null) {
 
 function getIssueWeight(level) {
   return level === "error" ? 2 : 1;
+}
+
+function getFilteredIssues() {
+  const { severity, codeFilter, selectedFileOnly } = getIssueFilterState();
+
+  return state.issues
+    .map((issue, originalIndex) => ({ issue, originalIndex }))
+    .filter(({ issue }) => {
+      if (severity !== "all" && issue.level !== severity) {
+        return false;
+      }
+
+      if (codeFilter && !issue.code.toLowerCase().includes(codeFilter)) {
+        return false;
+      }
+
+      if (selectedFileOnly && issue.entryKey !== state.selectedEntryKey) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort((a, b) => getIssueWeight(b.issue.level) - getIssueWeight(a.issue.level));
+}
+
+function describeIssueFilterSummary() {
+  const { severity, codeFilter, selectedFileOnly } = getIssueFilterState();
+  const parts = [];
+
+  if (severity !== "all") {
+    parts.push(severity);
+  }
+
+  if (codeFilter) {
+    parts.push(`code:${codeFilter}`);
+  }
+
+  if (selectedFileOnly) {
+    parts.push(state.selectedEntryKey ? `file:${state.selectedEntryKey}` : "selected file");
+  }
+
+  return parts.length ? parts.join(" | ") : "all issues";
+}
+
+function refreshIssueFeedFeedback() {
+  const filteredIssues = getFilteredIssues();
+  const totalIssues = state.issues.length;
+  const filterSummary = describeIssueFilterSummary();
+
+  if (totalIssues === 0) {
+    elements.issueHint.textContent = "No issues reported yet.";
+    return;
+  }
+
+  if (filteredIssues.length === totalIssues && filterSummary === "all issues") {
+    elements.issueHint.textContent = `${totalIssues} issues found. Highest severity first.`;
+    return;
+  }
+
+  elements.issueHint.textContent = `Showing ${filteredIssues.length} of ${totalIssues} issues for ${filterSummary}.`;
+}
+
+function updateFilterStatus() {
+  if (!state.datasetEntries.length) {
+    return;
+  }
+
+  const filteredCount = getFilteredIssues().length;
+  const filterSummary = describeIssueFilterSummary();
+  const message = filteredCount
+    ? `Issue filter active: ${filterSummary}. ${filteredCount} issues shown.`
+    : `Issue filter active: ${filterSummary}. No matching issues.`;
+
+  setStatus(message, filteredCount === 0 && state.issues.length > 0 ? "warn" : "info");
 }
 
 async function loadImageInfo(file) {
@@ -333,20 +419,6 @@ async function buildDatasetEntries() {
   return { entries, issues };
 }
 
-function updateMetrics() {
-  const matchedPairs = state.datasetEntries.filter((entry) => entry.imageFile && entry.labelFile).length;
-  elements.metricImages.textContent = String(state.imageFiles.length);
-  elements.metricLabels.textContent = String(state.labelFiles.length);
-  elements.metricPairs.textContent = String(matchedPairs);
-  elements.metricIssues.textContent = String(state.issues.length);
-  elements.inventoryHint.textContent = state.datasetEntries.length
-    ? `${state.datasetEntries.length} files tracked in the current dataset view.`
-    : "No analysis yet.";
-  elements.issueHint.textContent = state.issues.length
-    ? `${state.issues.length} issues found. Highest severity first.`
-    : "No issues reported yet.";
-}
-
 function renderDatasetList() {
   if (!state.datasetEntries.length) {
     elements.fileList.innerHTML = '<li class="empty-state">Run analysis to build the dataset list.</li>';
@@ -379,17 +451,36 @@ function renderDatasetList() {
     .join("");
 }
 
+function updateMetrics() {
+  const matchedPairs = state.datasetEntries.filter((entry) => entry.imageFile && entry.labelFile).length;
+  elements.metricImages.textContent = String(state.imageFiles.length);
+  elements.metricLabels.textContent = String(state.labelFiles.length);
+  elements.metricPairs.textContent = String(matchedPairs);
+  elements.metricIssues.textContent = String(state.issues.length);
+  elements.inventoryHint.textContent = state.datasetEntries.length
+    ? `${state.datasetEntries.length} files tracked in the current dataset view.`
+    : "No analysis yet.";
+  refreshIssueFeedFeedback();
+}
+
 function renderIssueList() {
-  if (!state.issues.length) {
-    elements.issueList.innerHTML = '<li class="empty-state">Dataset issues will appear here.</li>';
+  const filteredIssues = getFilteredIssues();
+
+  if (!filteredIssues.length) {
+    if (state.issues.length === 0) {
+      elements.issueList.innerHTML = '<li class="empty-state">Dataset issues will appear here.</li>';
+    } else if (elements.selectedFileOnly && elements.selectedFileOnly.checked && !state.selectedEntryKey) {
+      elements.issueList.innerHTML = '<li class="empty-state">Select a dataset item to filter issues by file.</li>';
+    } else {
+      elements.issueList.innerHTML = '<li class="empty-state">No issues match the current filter.</li>';
+    }
     return;
   }
 
-  const sortedIssues = [...state.issues].sort((left, right) => getIssueWeight(right.level) - getIssueWeight(left.level));
-  elements.issueList.innerHTML = sortedIssues
-    .map((issue, index) => {
+  elements.issueList.innerHTML = filteredIssues
+    .map(({ issue, originalIndex }) => {
       const baseClass = issue.level === "error" ? "issue-error" : "issue-warning";
-      const selectedClass = state.selectedIssue === index ? " selected" : "";
+      const selectedClass = state.selectedIssue === originalIndex ? " selected" : "";
       const itemClass = `stack-item ${baseClass} issue-item-clickable${selectedClass}`;
 
       const lineMeta = issue.line ? ` | line ${issue.line}` : "";
@@ -398,7 +489,7 @@ function renderIssueList() {
       const dataAttrs = [];
       if (issue.entryKey) dataAttrs.push(`data-entry-key="${issue.entryKey}"`);
       if (issue.line) dataAttrs.push(`data-line="${issue.line}"`);
-      dataAttrs.push(`data-issue-index="${index}"`);
+      dataAttrs.push(`data-issue-index="${originalIndex}"`);
 
       return `
         <li class="${itemClass}" ${dataAttrs.join(" ")}>
@@ -753,10 +844,14 @@ function selectEntry(entryKey) {
   state.selectedIssue = null;
   state.highlightedRecordIndex = null;
   state.highlightedLineNumber = null;
+  updateMetrics();
   renderDatasetList();
   renderIssueList();
   renderPreview();
   renderLabelTextList();
+  if (elements.selectedFileOnly && elements.selectedFileOnly.checked) {
+    updateFilterStatus();
+  }
 }
 
 function buildReportPayload() {
@@ -893,6 +988,31 @@ if (elements.previewTabs) {
         switchPreviewTab(tabId);
       }
     });
+  });
+}
+
+// Filter event listeners
+if (elements.severityFilter) {
+  elements.severityFilter.addEventListener("change", () => {
+    updateMetrics();
+    renderIssueList();
+    updateFilterStatus();
+  });
+}
+
+if (elements.codeFilter) {
+  elements.codeFilter.addEventListener("input", () => {
+    updateMetrics();
+    renderIssueList();
+    updateFilterStatus();
+  });
+}
+
+if (elements.selectedFileOnly) {
+  elements.selectedFileOnly.addEventListener("change", () => {
+    updateMetrics();
+    renderIssueList();
+    updateFilterStatus();
   });
 }
 

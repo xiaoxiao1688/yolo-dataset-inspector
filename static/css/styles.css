@@ -432,6 +432,78 @@ button.ghost {
   border-left: 4px solid var(--accent) !important;
 }
 
+.issue-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 18px;
+  border: 1px solid var(--line);
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.filter-label {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.filter-group select,
+.filter-group input[type="text"] {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.84);
+  color: var(--text);
+  font-size: 0.9rem;
+  min-width: 120px;
+}
+
+.filter-group select {
+  cursor: pointer;
+}
+
+.filter-group input[type="text"]::placeholder {
+  color: var(--muted);
+}
+
+.filter-checkbox {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.filter-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.filter-checkbox .filter-label {
+  margin-bottom: 0;
+  cursor: pointer;
+  user-select: none;
+}
+
+@media (max-width: 760px) {
+  .issue-filters {
+    flex-direction: column;
+  }
+
+  .filter-checkbox {
+    margin-left: 0;
+    margin-top: 4px;
+  }
+}
+
 .record-highlight {
   animation: pulse-highlight 1.5s ease-in-out infinite;
 }

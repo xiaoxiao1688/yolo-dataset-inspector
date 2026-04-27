@@ -104,6 +104,24 @@
             <h2>Issue Feed</h2>
             <p id="issue-hint" class="panel-hint">No issues reported yet.</p>
           </div>
+          <div class="issue-filters">
+            <div class="filter-group">
+              <label class="filter-label">Severity</label>
+              <select id="severity-filter">
+                <option value="all">All</option>
+                <option value="error">Error</option>
+                <option value="warning">Warning</option>
+              </select>
+            </div>
+            <div class="filter-group">
+              <label class="filter-label">Issue Code</label>
+              <input type="text" id="code-filter" placeholder="Filter by code..." />
+            </div>
+            <div class="filter-group filter-checkbox">
+              <input type="checkbox" id="selected-file-only" />
+              <label for="selected-file-only" class="filter-label">Selected file only</label>
+            </div>
+          </div>
           <ul id="issue-list" class="stack-list">
             <li class="empty-state">Dataset issues will appear here.</li>
           </ul>
