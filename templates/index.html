@@ -102,7 +102,10 @@
         <article class="panel issues-panel">
           <div class="panel-head">
             <h2>Issue Feed</h2>
-            <p id="issue-hint" class="panel-hint">No issues reported yet.</p>
+            <div class="panel-head-actions">
+              <p id="issue-hint" class="panel-hint">No issues reported yet.</p>
+              <button id="export-filtered-button" class="ghost small" type="button" disabled>Export filtered</button>
+            </div>
           </div>
           <div class="issue-filters">
             <div class="filter-group">
@@ -115,7 +118,10 @@
             </div>
             <div class="filter-group">
               <label class="filter-label">Issue Code</label>
-              <input type="text" id="code-filter" placeholder="Filter by code..." />
+              <div class="code-select-wrapper" id="code-select-wrapper">
+                <input type="text" id="code-filter" placeholder="Filter by code..." autocomplete="off" />
+                <div class="code-dropdown" id="code-dropdown"></div>
+              </div>
             </div>
             <div class="filter-group filter-checkbox">
               <input type="checkbox" id="selected-file-only" />

@@ -29,6 +29,10 @@ const elements = {
   severityFilter: document.querySelector("#severity-filter"),
   codeFilter: document.querySelector("#code-filter"),
   selectedFileOnly: document.querySelector("#selected-file-only"),
+  // New elements for code dropdown and export
+  exportFilteredButton: document.querySelector("#export-filtered-button"),
+  codeSelectWrapper: document.querySelector("#code-select-wrapper"),
+  codeDropdown: document.querySelector("#code-dropdown"),
 };
 
 const state = {
@@ -74,6 +78,88 @@ function createIssue(level, code, message, entryKey = null, line = null) {
 
 function getIssueWeight(level) {
   return level === "error" ? 2 : 1;
+}
+
+function getUniqueIssueCodes(issues) {
+  const codeCounts = new Map();
+  issues.forEach((issue) => {
+    const count = codeCounts.get(issue.code) || 0;
+    codeCounts.set(issue.code, count + 1);
+  });
+  return Array.from(codeCounts.entries())
+    .map(([code, count]) => ({ code, count }))
+    .sort((a, b) => b.count - a.count || a.code.localeCompare(b.code));
+}
+
+function renderCodeDropdown() {
+  if (!elements.codeDropdown) {
+    return;
+  }
+
+  const filteredIssues = getFilteredIssues();
+  const issuesToUse = filteredIssues.length > 0
+    ? filteredIssues.map(item => item.issue)
+    : state.issues;
+
+  const uniqueCodes = getUniqueIssueCodes(issuesToUse);
+  const searchValue = elements.codeFilter ? elements.codeFilter.value.trim().toLowerCase() : "";
+
+  let filteredCodes = uniqueCodes;
+  if (searchValue) {
+    filteredCodes = uniqueCodes.filter(({ code }) =>
+      code.toLowerCase().includes(searchValue)
+    );
+  }
+
+  if (filteredCodes.length === 0) {
+    elements.codeDropdown.innerHTML = '<div class="code-dropdown-item">No matching codes</div>';
+    return;
+  }
+
+  elements.codeDropdown.innerHTML = `
+    <div class="code-dropdown-item" data-code="">
+      <span>All codes</span>
+      <span class="code-count">${state.issues.length}</span>
+    </div>
+    ${filteredCodes
+      .map(({ code, count }) => {
+        const isSelected = searchValue === code.toLowerCase();
+        const selectedClass = isSelected ? " selected" : "";
+        return `
+          <div class="code-dropdown-item${selectedClass}" data-code="${code}">
+            <span>${code}</span>
+            <span class="code-count">${count}</span>
+          </div>
+        `;
+      })
+      .join("")}
+  `;
+}
+
+function showCodeDropdown() {
+  if (!elements.codeDropdown) {
+    return;
+  }
+  renderCodeDropdown();
+  elements.codeDropdown.classList.add("show");
+}
+
+function hideCodeDropdown() {
+  if (!elements.codeDropdown) {
+    return;
+  }
+  elements.codeDropdown.classList.remove("show");
+}
+
+function toggleCodeDropdown() {
+  if (!elements.codeDropdown) {
+    return;
+  }
+  if (elements.codeDropdown.classList.contains("show")) {
+    hideCodeDropdown();
+  } else {
+    showCodeDropdown();
+  }
 }
 
 function getFilteredIssues() {
@@ -876,6 +962,52 @@ function buildReportPayload() {
   };
 }
 
+function buildFilteredReportPayload() {
+  const filteredIssues = getFilteredIssues();
+  const filterSummary = describeIssueFilterSummary();
+
+  const issueList = filteredIssues.map(({ issue }) => issue);
+
+  const affectedEntryKeys = new Set(
+    issueList.filter((issue) => issue.entryKey).map((issue) => issue.entryKey)
+  );
+
+  const affectedEntries = state.datasetEntries
+    .filter((entry) => affectedEntryKeys.has(entry.key))
+    .map((entry) => ({
+      key: entry.key,
+      imageName: entry.imageFile?.name || null,
+      labelName: entry.labelFile?.name || null,
+      parsedRecordCount: entry.records.length,
+      issues: entry.issues.filter((issue) =>
+        issueList.some((fi) => fi === issue)
+      ),
+    }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    taskType: state.taskType,
+    classNames: parseClassNames(),
+    filterApplied: filterSummary,
+    summary: {
+      totalIssueCount: state.issues.length,
+      filteredIssueCount: filteredIssues.length,
+      affectedEntryCount: affectedEntries.length,
+    },
+    entries: affectedEntries,
+    issues: issueList,
+  };
+}
+
+function updateExportButtonState() {
+  if (!elements.exportFilteredButton) {
+    return;
+  }
+
+  const filteredIssues = getFilteredIssues();
+  elements.exportFilteredButton.disabled = filteredIssues.length === 0;
+}
+
 function downloadJson(filename, payload) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -908,6 +1040,7 @@ async function analyzeDataset() {
   renderIssueList();
   renderPreview();
   renderLabelTextList();
+  updateExportButtonState();
 
   if (state.issues.length) {
     setStatus(`Analysis complete. ${state.issues.length} issues found.`, "warn");
@@ -997,6 +1130,7 @@ if (elements.severityFilter) {
     updateMetrics();
     renderIssueList();
     updateFilterStatus();
+    updateExportButtonState();
   });
 }
 
@@ -1005,6 +1139,20 @@ if (elements.codeFilter) {
     updateMetrics();
     renderIssueList();
     updateFilterStatus();
+    updateExportButtonState();
+    if (elements.codeDropdown && elements.codeDropdown.classList.contains("show")) {
+      renderCodeDropdown();
+    }
+  });
+
+  elements.codeFilter.addEventListener("focus", () => {
+    showCodeDropdown();
+  });
+
+  elements.codeFilter.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      hideCodeDropdown();
+    }
   });
 }
 
@@ -1013,6 +1161,53 @@ if (elements.selectedFileOnly) {
     updateMetrics();
     renderIssueList();
     updateFilterStatus();
+    updateExportButtonState();
+  });
+}
+
+// Code dropdown click listener
+if (elements.codeDropdown) {
+  elements.codeDropdown.addEventListener("click", (event) => {
+    const item = event.target.closest(".code-dropdown-item");
+    if (!item) {
+      return;
+    }
+
+    const code = item.dataset.code;
+    if (code === undefined) {
+      return;
+    }
+
+    if (elements.codeFilter) {
+      elements.codeFilter.value = code;
+    }
+
+    hideCodeDropdown();
+    updateMetrics();
+    renderIssueList();
+    updateFilterStatus();
+    updateExportButtonState();
+  });
+}
+
+// Close dropdown when clicking outside
+document.addEventListener("click", (event) => {
+  if (
+    elements.codeSelectWrapper &&
+    !elements.codeSelectWrapper.contains(event.target)
+  ) {
+    hideCodeDropdown();
+  }
+});
+
+// Export filtered button listener
+if (elements.exportFilteredButton) {
+  elements.exportFilteredButton.addEventListener("click", () => {
+    const payload = buildFilteredReportPayload();
+    const filterSummary = describeIssueFilterSummary();
+    const safeFilterName = filterSummary.replace(/[^a-z0-9]/gi, "_").toLowerCase();
+    downloadJson(`yolo-qa-filtered-${safeFilterName}.json`, payload);
+    setStatus(`Exported ${payload.issues.length} filtered issues.`);
   });
 }
 
@@ -1022,3 +1217,4 @@ renderDatasetList();
 renderIssueList();
 renderPreview();
 renderLabelTextList();
+updateExportButtonState();

@@ -119,6 +119,13 @@ textarea {
   margin-bottom: 16px;
 }
 
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
 .panel-head h2 {
   margin: 0;
   font-size: 1.1rem;
@@ -191,6 +198,17 @@ button.primary {
 button.ghost {
   background: rgba(17, 94, 89, 0.08);
   color: var(--accent-strong);
+}
+
+button.small {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .metrics-grid {
@@ -491,6 +509,52 @@ button.ghost {
   margin-bottom: 0;
   cursor: pointer;
   user-select: none;
+}
+
+.code-select-wrapper {
+  position: relative;
+}
+
+.code-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+  z-index: 100;
+  display: none;
+}
+
+.code-dropdown.show {
+  display: block;
+}
+
+.code-dropdown-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: background 100ms ease;
+  font-size: 0.9rem;
+}
+
+.code-dropdown-item:hover {
+  background: rgba(15, 118, 110, 0.08);
+}
+
+.code-dropdown-item.selected {
+  background: rgba(15, 118, 110, 0.15);
+  font-weight: 600;
+}
+
+.code-dropdown-item .code-count {
+  float: right;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 @media (max-width: 760px) {
