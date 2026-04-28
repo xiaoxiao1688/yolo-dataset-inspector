@@ -3,18 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>YOLO Dataset Repair Workbench</title>
+    <title>YOLO Auto Label QA Studio</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
   </head>
   <body>
     <main class="app-shell">
       <section class="hero">
         <div>
-          <p class="eyebrow">YOLO DATASET REPAIR WORKBENCH</p>
-          <h1>Scan real dataset issues before building batch repair.</h1>
+          <p class="eyebrow">YOLO AUTO LABEL QA STUDIO</p>
+          <h1>Detect, Compare, and Fix Label Quality Issues</h1>
           <p class="hero-copy">
-            This framework already handles upload, scan, issue aggregation, and repair-plan suggestions.
-            The next step is turning suggestions into real batch-fix actions.
+            Import images, classes, and optional existing labels. Run local YOLO inference to generate candidate boxes.
+            Compare ground truth with model suggestions to identify missing labels, wrong labels, class conflicts, and anomalous boxes.
           </p>
         </div>
         <div class="hero-meta">
@@ -23,8 +23,8 @@
             <strong id="hero-health">Ready</strong>
           </div>
           <div class="meta-card">
-            <span class="meta-label">Scope</span>
-            <strong>Scan First</strong>
+            <span class="meta-label">Session</span>
+            <strong id="session-id">None</strong>
           </div>
         </div>
       </section>
@@ -32,34 +32,42 @@
       <section class="panel controls-panel">
         <div class="panel-head">
           <div>
-            <h2>Dataset Inputs</h2>
-            <p id="status-line" class="panel-hint">Upload files and run a scan.</p>
+            <h2>QA Inputs</h2>
+            <p id="status-line" class="panel-hint">Upload images, optional labels, and configure classes.</p>
           </div>
-          <button id="export-report-button" class="ghost" type="button" disabled>Export scan report</button>
+          <div class="button-group">
+            <button id="export-labels-button" class="ghost" type="button" disabled>Export Labels</button>
+            <button id="export-audit-button" class="ghost" type="button" disabled>Export Audit</button>
+          </div>
         </div>
         <div class="controls-grid">
-          <label class="field">
-            <span>YOLO task</span>
-            <select id="task-type">
-              <option value="detect">Detect</option>
-              <option value="segment">Segment</option>
-            </select>
-          </label>
           <label class="field">
             <span>Image files</span>
             <input id="image-input" type="file" accept="image/*" multiple />
           </label>
           <label class="field">
-            <span>Label files</span>
+            <span>Label files (optional)</span>
             <input id="label-input" type="file" accept=".txt,text/plain" multiple />
           </label>
+          <label class="field">
+            <span>Confidence threshold</span>
+            <input id="conf-threshold" type="number" min="0.01" max="0.99" step="0.01" value="0.25" />
+          </label>
+          <label class="field">
+            <span>IoU threshold</span>
+            <input id="iou-threshold" type="number" min="0.1" max="0.9" step="0.05" value="0.45" />
+          </label>
           <label class="field field-wide">
-            <span>Class names</span>
-            <textarea id="class-names" rows="5" placeholder="One class per line"></textarea>
+            <span>Class names (one per line, or leave empty for COCO 80 classes)</span>
+            <textarea id="class-names" rows="5" placeholder="person
+bicycle
+car
+motorcycle
+airplane"></textarea>
           </label>
         </div>
         <div class="action-row">
-          <button id="scan-button" class="primary" type="button">Run dataset scan</button>
+          <button id="run-qa-button" class="primary" type="button">Run QA Detection</button>
         </div>
       </section>
 
@@ -69,12 +77,12 @@
           <strong id="metric-images">0</strong>
         </article>
         <article class="metric-card">
-          <span class="metric-label">Labels</span>
-          <strong id="metric-labels">0</strong>
+          <span class="metric-label">Ground Truth</span>
+          <strong id="metric-gt">0</strong>
         </article>
         <article class="metric-card">
-          <span class="metric-label">Entries</span>
-          <strong id="metric-entries">0</strong>
+          <span class="metric-label">Model Detections</span>
+          <strong id="metric-det">0</strong>
         </article>
         <article class="metric-card danger">
           <span class="metric-label">Issues</span>
@@ -86,36 +94,36 @@
         <article class="panel">
           <div class="panel-head">
             <div>
-              <h2>Dataset Entries</h2>
-              <p id="inventory-hint" class="panel-hint">No scan yet.</p>
+              <h2>Images</h2>
+              <p id="image-hint" class="panel-hint">No images processed yet.</p>
             </div>
           </div>
-          <ul id="entry-list" class="stack-list">
-            <li class="empty-state">Scan results will appear here.</li>
+          <ul id="image-list" class="stack-list">
+            <li class="empty-state">Processed images will appear here. Click to view details.</li>
           </ul>
         </article>
 
         <article class="panel">
           <div class="panel-head">
             <div>
-              <h2>Issue Feed</h2>
-              <p id="issue-hint" class="panel-hint">No issues reported yet.</p>
+              <h2>Issue Details</h2>
+              <p id="issue-detail-hint" class="panel-hint">Select an image to view issues.</p>
             </div>
           </div>
-          <ul id="issue-list" class="stack-list">
-            <li class="empty-state">Issue results will appear here.</li>
-          </ul>
+          <div id="issue-detail-panel" class="issue-detail-container">
+            <div class="empty-state">Select an image from the left to view detailed issues and make decisions.</div>
+          </div>
         </article>
 
         <article class="panel">
           <div class="panel-head">
             <div>
-              <h2>Repair Plan</h2>
-              <p class="panel-hint">This is the next implementation surface.</p>
+              <h2>Decision Summary</h2>
+              <p id="decision-hint" class="panel-hint">No decisions made yet.</p>
             </div>
           </div>
-          <div id="repair-plan" class="plan-list">
-            <div class="empty-state">Scan a dataset to generate repair suggestions.</div>
+          <div id="decision-panel" class="decision-container">
+            <div class="empty-state">Accept or reject suggestions to populate this panel.</div>
           </div>
         </article>
       </section>
