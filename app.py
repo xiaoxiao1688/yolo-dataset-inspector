@@ -1,7 +1,8 @@
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, jsonify, render_template, request, send_file, send_from_directory
 from io import BytesIO
 import json
 import uuid
+from pathlib import Path
 
 from repair_workbench.scanner import scan_dataset
 from repair_workbench.yolo_runtime import environment_summary
@@ -10,7 +11,48 @@ from repair_workbench.qa_engine import process_qa_task
 
 app = Flask(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+SESSION_DATA_DIR = PROJECT_ROOT / "session_data"
+SESSION_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 qa_session_store = {}
+
+
+def get_session_dir(session_id: str) -> Path:
+    return SESSION_DATA_DIR / session_id
+
+
+def save_session_to_disk(session_id: str, session_data: dict):
+    session_dir = get_session_dir(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    session_file = session_dir / "session.json"
+    with open(session_file, "w", encoding="utf-8") as f:
+        json.dump(session_data, f, indent=2, default=str)
+
+
+def load_session_from_disk(session_id: str) -> dict | None:
+    session_file = get_session_dir(session_id) / "session.json"
+    if not session_file.exists():
+        return None
+
+    with open(session_file, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_image(session_id: str, image_key: str, image_data: bytes, filename: str) -> str:
+    session_dir = get_session_dir(session_id)
+    images_dir = session_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = Path(filename).suffix or ".jpg"
+    safe_filename = f"{image_key}{ext}"
+    image_path = images_dir / safe_filename
+
+    with open(image_path, "wb") as f:
+        f.write(image_data)
+
+    return safe_filename
 
 
 def generate_session_id():
@@ -67,10 +109,20 @@ def qa_process():
 
     session_id = generate_session_id()
     results = []
+    image_filenames = {}
 
     for image_file in image_files:
         image_key = image_file.filename.rsplit(".", 1)[0].lower()
         label_file = label_map.get(image_key)
+
+        image_data = image_file.read()
+        try:
+            image_file.stream.seek(0)
+        except Exception:
+            pass
+
+        saved_filename = save_image(session_id, image_key, image_data, image_file.filename)
+        image_filenames[image_key] = saved_filename
 
         try:
             qa_result = process_qa_task(
@@ -81,16 +133,21 @@ def qa_process():
                 iou_threshold=iou_threshold,
             )
             qa_result["image_key"] = image_key
+            qa_result["image_filename"] = saved_filename
             qa_result["decisions"] = []
             results.append(qa_result)
         except Exception as e:
             return jsonify({"error": f"Processing failed for {image_file.filename}: {str(e)}"}), 500
 
-    qa_session_store[session_id] = {
+    session_data = {
         "session_id": session_id,
         "results": results,
         "class_names": results[0]["class_names"] if results else [],
+        "image_filenames": image_filenames,
     }
+
+    qa_session_store[session_id] = session_data
+    save_session_to_disk(session_id, session_data)
 
     summary = {
         "total_images": len(results),
@@ -157,7 +214,19 @@ def qa_set_decision():
     else:
         result["decisions"].append(new_decision)
 
+    save_session_to_disk(session_id, session)
+
     return jsonify({"status": "ok", "message": f"Decision '{decision}' recorded"})
+
+
+@app.get("/api/qa/image/<session_id>/<filename>")
+def qa_get_image(session_id, filename):
+    session_dir = get_session_dir(session_id)
+    images_dir = session_dir / "images"
+    if not images_dir.exists():
+        return jsonify({"error": "Image not found"}), 404
+
+    return send_from_directory(str(images_dir), filename)
 
 
 def build_final_labels(session):
@@ -169,70 +238,75 @@ def build_final_labels(session):
 
         decisions = {d["issue_index"]: d["decision"] for d in result["decisions"]}
 
-        class_conflict_gt_indices = set()
-        class_conflict_decisions = {}
+        gt_box_issue_map = {}
+        class_conflict_map = {}
+        missing_label_map = {}
 
         for issue_idx, issue in enumerate(result["comparison"]["issues"]):
-            if issue.get("type") == "class_conflict":
-                if issue_idx in decisions:
-                    gt_box = issue.get("ground_truth", {})
-                    if "box_index" in gt_box:
-                        class_conflict_gt_indices.add(gt_box["box_index"])
-                        class_conflict_decisions[gt_box["box_index"]] = {
-                            "decision": decisions[issue_idx],
-                            "issue": issue,
-                        }
+            issue_type = issue.get("type")
+            source = issue.get("source")
+
+            if issue_type == "class_conflict":
+                gt_box = issue.get("ground_truth", {})
+                if "box_index" in gt_box:
+                    gt_idx = gt_box["box_index"]
+                    gt_box_issue_map[gt_idx] = issue_idx
+                    class_conflict_map[gt_idx] = {
+                        "issue_idx": issue_idx,
+                        "issue": issue,
+                    }
+            elif issue_type == "missing_label":
+                if source == "detection":
+                    det_idx = issue.get("box_index")
+                    if det_idx is not None:
+                        missing_label_map[det_idx] = issue_idx
+            elif source == "ground_truth":
+                gt_idx = issue.get("box_index")
+                if gt_idx is not None and gt_idx not in gt_box_issue_map:
+                    gt_box_issue_map[gt_idx] = issue_idx
 
         for gt_idx, gt_box in enumerate(result["ground_truth"]):
-            if gt_idx in class_conflict_gt_indices:
-                continue
+            if gt_idx in class_conflict_map:
+                conflict_info = class_conflict_map[gt_idx]
+                issue_idx = conflict_info["issue_idx"]
+                issue = conflict_info["issue"]
 
-            keep_gt = True
-
-            for issue_idx, issue in enumerate(result["comparison"]["issues"]):
-                if issue.get("source") == "ground_truth" and issue.get("box_index") == gt_idx:
-                    if issue_idx in decisions:
-                        if decisions[issue_idx] == "reject":
-                            keep_gt = False
-                        break
-
-            if keep_gt:
-                final_boxes.append({
-                    "class_id": gt_box["class_id"],
-                    "x_center": gt_box["x_center"],
-                    "y_center": gt_box["y_center"],
-                    "width": gt_box["width"],
-                    "height": gt_box["height"],
-                })
-
-        for gt_idx in class_conflict_gt_indices:
-            if gt_idx >= len(result["ground_truth"]):
-                continue
-
-            gt_box = result["ground_truth"][gt_idx]
-            decision_info = class_conflict_decisions.get(gt_idx, {})
-            decision = decision_info.get("decision")
-            issue = decision_info.get("issue", {})
-
-            if decision == "accept":
-                det_info = issue.get("detection", {})
-                box_info = det_info.get("box", {})
-                final_boxes.append({
-                    "class_id": det_info.get("class_id", 0),
-                    "x_center": box_info.get("x_center", 0),
-                    "y_center": box_info.get("y_center", 0),
-                    "width": box_info.get("width", 0),
-                    "height": box_info.get("height", 0),
-                })
-            elif decision == "keep":
-                final_boxes.append({
-                    "class_id": gt_box["class_id"],
-                    "x_center": gt_box["x_center"],
-                    "y_center": gt_box["y_center"],
-                    "width": gt_box["width"],
-                    "height": gt_box["height"],
-                })
+                if issue_idx in decisions:
+                    decision = decisions[issue_idx]
+                    if decision == "accept":
+                        det_info = issue.get("detection", {})
+                        box_info = det_info.get("box", {})
+                        final_boxes.append({
+                            "class_id": det_info.get("class_id", 0),
+                            "x_center": box_info.get("x_center", 0),
+                            "y_center": box_info.get("y_center", 0),
+                            "width": box_info.get("width", 0),
+                            "height": box_info.get("height", 0),
+                        })
+                    elif decision == "reject":
+                        pass
+                    else:
+                        final_boxes.append({
+                            "class_id": gt_box["class_id"],
+                            "x_center": gt_box["x_center"],
+                            "y_center": gt_box["y_center"],
+                            "width": gt_box["width"],
+                            "height": gt_box["height"],
+                        })
+                else:
+                    final_boxes.append({
+                        "class_id": gt_box["class_id"],
+                        "x_center": gt_box["x_center"],
+                        "y_center": gt_box["y_center"],
+                        "width": gt_box["width"],
+                        "height": gt_box["height"],
+                    })
             else:
+                if gt_idx in gt_box_issue_map:
+                    issue_idx = gt_box_issue_map[gt_idx]
+                    if issue_idx in decisions and decisions[issue_idx] == "reject":
+                        continue
+
                 final_boxes.append({
                     "class_id": gt_box["class_id"],
                     "x_center": gt_box["x_center"],
@@ -242,22 +316,16 @@ def build_final_labels(session):
                 })
 
         for det_idx, det_box in enumerate(result["detections"]):
-            add_det = False
-
-            for issue_idx, issue in enumerate(result["comparison"]["issues"]):
-                if issue.get("type") == "missing_label" and issue.get("source") == "detection" and issue.get("box_index") == det_idx:
-                    if issue_idx in decisions and decisions[issue_idx] == "accept":
-                        add_det = True
-                        break
-
-            if add_det:
-                final_boxes.append({
-                    "class_id": det_box["class_id"],
-                    "x_center": det_box["x_center"],
-                    "y_center": det_box["y_center"],
-                    "width": det_box["width"],
-                    "height": det_box["height"],
-                })
+            if det_idx in missing_label_map:
+                issue_idx = missing_label_map[det_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "accept":
+                    final_boxes.append({
+                        "class_id": det_box["class_id"],
+                        "x_center": det_box["x_center"],
+                        "y_center": det_box["y_center"],
+                        "width": det_box["width"],
+                        "height": det_box["height"],
+                    })
 
         all_labels[image_key] = {
             "boxes": final_boxes,

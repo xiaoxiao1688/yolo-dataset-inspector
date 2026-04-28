@@ -90,6 +90,26 @@ airplane"></textarea>
         </article>
       </section>
 
+      <section class="workspace-main">
+        <section class="panel preview-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Image Preview</h2>
+              <p id="preview-hint" class="panel-hint">Select an image to preview with boxes.</p>
+            </div>
+            <div class="legend-group">
+              <span class="legend-item legend-gt">Ground Truth</span>
+              <span class="legend-item legend-det">Model Detection</span>
+              <span class="legend-item legend-highlight">Selected</span>
+            </div>
+          </div>
+          <div class="preview-container">
+            <canvas id="preview-canvas"></canvas>
+            <div id="preview-empty" class="empty-state">Select an image from the left to preview.</div>
+          </div>
+        </section>
+      </section>
+
       <section class="workspace-grid">
         <article class="panel">
           <div class="panel-head">

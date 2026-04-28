@@ -214,9 +214,9 @@ class TestDecisionUpdate:
         assert decisions[1]["decision"] == "reject"
 
 
-class TestBuildFinalLabels:
-    def test_class_conflict_should_not_duplicate(self):
-        session = {
+class TestBuildFinalLabelsLogic:
+    def test_class_conflict_accept_should_use_detection(self):
+        session_data = {
             "results": [
                 {
                     "image_key": "test",
@@ -246,6 +246,7 @@ class TestBuildFinalLabels:
                                 "ground_truth": {
                                     "box_index": 0,
                                     "class_id": 0,
+                                    "class_name": "person",
                                     "box": {
                                         "x_center": 0.5,
                                         "y_center": 0.5,
@@ -255,6 +256,7 @@ class TestBuildFinalLabels:
                                 },
                                 "detection": {
                                     "class_id": 1,
+                                    "class_name": "car",
                                     "box": {
                                         "x_center": 0.5,
                                         "y_center": 0.5,
@@ -279,35 +281,67 @@ class TestBuildFinalLabels:
             ]
         }
 
-        class_conflict_gt_indices = set()
-        decisions_dict = {d["issue_index"]: d["decision"] for d in session["results"][0]["decisions"]}
+        result = session_data["results"][0]
+        decisions = {d["issue_index"]: d["decision"] for d in result["decisions"]}
 
-        for issue_idx, issue in enumerate(session["results"][0]["comparison"]["issues"]):
-            if issue.get("type") == "class_conflict":
-                if issue_idx in decisions_dict:
-                    gt_box = issue.get("ground_truth", {})
-                    if "box_index" in gt_box:
-                        class_conflict_gt_indices.add(gt_box["box_index"])
+        gt_box_issue_map = {}
+        class_conflict_map = {}
+        missing_label_map = {}
 
-        assert 0 in class_conflict_gt_indices
+        for issue_idx, issue in enumerate(result["comparison"]["issues"]):
+            issue_type = issue.get("type")
+            source = issue.get("source")
+
+            if issue_type == "class_conflict":
+                gt_box = issue.get("ground_truth", {})
+                if "box_index" in gt_box:
+                    gt_idx = gt_box["box_index"]
+                    gt_box_issue_map[gt_idx] = issue_idx
+                    class_conflict_map[gt_idx] = {
+                        "issue_idx": issue_idx,
+                        "issue": issue,
+                    }
+            elif issue_type == "missing_label":
+                if source == "detection":
+                    det_idx = issue.get("box_index")
+                    if det_idx is not None:
+                        missing_label_map[det_idx] = issue_idx
+            elif source == "ground_truth":
+                gt_idx = issue.get("box_index")
+                if gt_idx is not None and gt_idx not in gt_box_issue_map:
+                    gt_box_issue_map[gt_idx] = issue_idx
 
         final_boxes = []
-        ground_truth = session["results"][0]["ground_truth"]
 
-        for gt_idx, gt_box in enumerate(ground_truth):
-            if gt_idx in class_conflict_gt_indices:
+        for gt_idx, gt_box in enumerate(result["ground_truth"]):
+            if gt_idx in class_conflict_map:
                 continue
-            final_boxes.append(gt_box)
 
-        assert len(final_boxes) == 0
+            if gt_idx in gt_box_issue_map:
+                issue_idx = gt_box_issue_map[gt_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "reject":
+                    continue
 
-        for gt_idx in class_conflict_gt_indices:
-            if gt_idx < len(ground_truth):
-                gt_box = ground_truth[gt_idx]
-                decision = decisions_dict.get(0)
+            final_boxes.append({
+                "class_id": gt_box["class_id"],
+                "x_center": gt_box["x_center"],
+                "y_center": gt_box["y_center"],
+                "width": gt_box["width"],
+                "height": gt_box["height"],
+            })
 
+        for gt_idx in class_conflict_map:
+            if gt_idx >= len(result["ground_truth"]):
+                continue
+
+            gt_box = result["ground_truth"][gt_idx]
+            conflict_info = class_conflict_map[gt_idx]
+            issue_idx = conflict_info["issue_idx"]
+            issue = conflict_info["issue"]
+
+            if issue_idx in decisions:
+                decision = decisions[issue_idx]
                 if decision == "accept":
-                    issue = session["results"][0]["comparison"]["issues"][0]
                     det_info = issue.get("detection", {})
                     box_info = det_info.get("box", {})
                     final_boxes.append({
@@ -317,8 +351,678 @@ class TestBuildFinalLabels:
                         "width": box_info.get("width", 0),
                         "height": box_info.get("height", 0),
                     })
+                elif decision == "reject":
+                    pass
                 else:
-                    final_boxes.append(gt_box)
+                    final_boxes.append({
+                        "class_id": gt_box["class_id"],
+                        "x_center": gt_box["x_center"],
+                        "y_center": gt_box["y_center"],
+                        "width": gt_box["width"],
+                        "height": gt_box["height"],
+                    })
+            else:
+                final_boxes.append({
+                    "class_id": gt_box["class_id"],
+                    "x_center": gt_box["x_center"],
+                    "y_center": gt_box["y_center"],
+                    "width": gt_box["width"],
+                    "height": gt_box["height"],
+                })
+
+        for det_idx, det_box in enumerate(result["detections"]):
+            if det_idx in missing_label_map:
+                issue_idx = missing_label_map[det_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "accept":
+                    final_boxes.append({
+                        "class_id": det_box["class_id"],
+                        "x_center": det_box["x_center"],
+                        "y_center": det_box["y_center"],
+                        "width": det_box["width"],
+                        "height": det_box["height"],
+                    })
 
         assert len(final_boxes) == 1
         assert final_boxes[0]["class_id"] == 1
+
+    def test_class_conflict_keep_should_use_ground_truth(self):
+        session_data = {
+            "results": [
+                {
+                    "image_key": "test",
+                    "ground_truth": [
+                        {
+                            "class_id": 0,
+                            "x_center": 0.5,
+                            "y_center": 0.5,
+                            "width": 0.2,
+                            "height": 0.2,
+                        }
+                    ],
+                    "detections": [
+                        {
+                            "class_id": 1,
+                            "x_center": 0.5,
+                            "y_center": 0.5,
+                            "width": 0.2,
+                            "height": 0.2,
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "comparison": {
+                        "issues": [
+                            {
+                                "type": "class_conflict",
+                                "ground_truth": {
+                                    "box_index": 0,
+                                    "class_id": 0,
+                                    "class_name": "person",
+                                    "box": {
+                                        "x_center": 0.5,
+                                        "y_center": 0.5,
+                                        "width": 0.2,
+                                        "height": 0.2,
+                                    },
+                                },
+                                "detection": {
+                                    "class_id": 1,
+                                    "class_name": "car",
+                                    "box": {
+                                        "x_center": 0.5,
+                                        "y_center": 0.5,
+                                        "width": 0.2,
+                                        "height": 0.2,
+                                    },
+                                },
+                            }
+                        ]
+                    },
+                    "decisions": [
+                        {
+                            "issue_index": 0,
+                            "decision": "keep",
+                            "issue": {
+                                "type": "class_conflict",
+                                "ground_truth": {"box_index": 0},
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = session_data["results"][0]
+        decisions = {d["issue_index"]: d["decision"] for d in result["decisions"]}
+
+        gt_box_issue_map = {}
+        class_conflict_map = {}
+        missing_label_map = {}
+
+        for issue_idx, issue in enumerate(result["comparison"]["issues"]):
+            issue_type = issue.get("type")
+            source = issue.get("source")
+
+            if issue_type == "class_conflict":
+                gt_box = issue.get("ground_truth", {})
+                if "box_index" in gt_box:
+                    gt_idx = gt_box["box_index"]
+                    gt_box_issue_map[gt_idx] = issue_idx
+                    class_conflict_map[gt_idx] = {
+                        "issue_idx": issue_idx,
+                        "issue": issue,
+                    }
+            elif issue_type == "missing_label":
+                if source == "detection":
+                    det_idx = issue.get("box_index")
+                    if det_idx is not None:
+                        missing_label_map[det_idx] = issue_idx
+            elif source == "ground_truth":
+                gt_idx = issue.get("box_index")
+                if gt_idx is not None and gt_idx not in gt_box_issue_map:
+                    gt_box_issue_map[gt_idx] = issue_idx
+
+        final_boxes = []
+
+        for gt_idx, gt_box in enumerate(result["ground_truth"]):
+            if gt_idx in class_conflict_map:
+                continue
+
+            if gt_idx in gt_box_issue_map:
+                issue_idx = gt_box_issue_map[gt_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "reject":
+                    continue
+
+            final_boxes.append({
+                "class_id": gt_box["class_id"],
+                "x_center": gt_box["x_center"],
+                "y_center": gt_box["y_center"],
+                "width": gt_box["width"],
+                "height": gt_box["height"],
+            })
+
+        for gt_idx in class_conflict_map:
+            if gt_idx >= len(result["ground_truth"]):
+                continue
+
+            gt_box = result["ground_truth"][gt_idx]
+            conflict_info = class_conflict_map[gt_idx]
+            issue_idx = conflict_info["issue_idx"]
+            issue = conflict_info["issue"]
+
+            if issue_idx in decisions:
+                decision = decisions[issue_idx]
+                if decision == "accept":
+                    det_info = issue.get("detection", {})
+                    box_info = det_info.get("box", {})
+                    final_boxes.append({
+                        "class_id": det_info.get("class_id", 0),
+                        "x_center": box_info.get("x_center", 0),
+                        "y_center": box_info.get("y_center", 0),
+                        "width": box_info.get("width", 0),
+                        "height": box_info.get("height", 0),
+                    })
+                elif decision == "reject":
+                    pass
+                else:
+                    final_boxes.append({
+                        "class_id": gt_box["class_id"],
+                        "x_center": gt_box["x_center"],
+                        "y_center": gt_box["y_center"],
+                        "width": gt_box["width"],
+                        "height": gt_box["height"],
+                    })
+            else:
+                final_boxes.append({
+                    "class_id": gt_box["class_id"],
+                    "x_center": gt_box["x_center"],
+                    "y_center": gt_box["y_center"],
+                    "width": gt_box["width"],
+                    "height": gt_box["height"],
+                })
+
+        for det_idx, det_box in enumerate(result["detections"]):
+            if det_idx in missing_label_map:
+                issue_idx = missing_label_map[det_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "accept":
+                    final_boxes.append({
+                        "class_id": det_box["class_id"],
+                        "x_center": det_box["x_center"],
+                        "y_center": det_box["y_center"],
+                        "width": det_box["width"],
+                        "height": det_box["height"],
+                    })
+
+        assert len(final_boxes) == 1
+        assert final_boxes[0]["class_id"] == 0
+
+    def test_class_conflict_reject_should_remove_both(self):
+        session_data = {
+            "results": [
+                {
+                    "image_key": "test",
+                    "ground_truth": [
+                        {
+                            "class_id": 0,
+                            "x_center": 0.5,
+                            "y_center": 0.5,
+                            "width": 0.2,
+                            "height": 0.2,
+                        }
+                    ],
+                    "detections": [
+                        {
+                            "class_id": 1,
+                            "x_center": 0.5,
+                            "y_center": 0.5,
+                            "width": 0.2,
+                            "height": 0.2,
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "comparison": {
+                        "issues": [
+                            {
+                                "type": "class_conflict",
+                                "ground_truth": {
+                                    "box_index": 0,
+                                    "class_id": 0,
+                                    "class_name": "person",
+                                    "box": {
+                                        "x_center": 0.5,
+                                        "y_center": 0.5,
+                                        "width": 0.2,
+                                        "height": 0.2,
+                                    },
+                                },
+                                "detection": {
+                                    "class_id": 1,
+                                    "class_name": "car",
+                                    "box": {
+                                        "x_center": 0.5,
+                                        "y_center": 0.5,
+                                        "width": 0.2,
+                                        "height": 0.2,
+                                    },
+                                },
+                            }
+                        ]
+                    },
+                    "decisions": [
+                        {
+                            "issue_index": 0,
+                            "decision": "reject",
+                            "issue": {
+                                "type": "class_conflict",
+                                "ground_truth": {"box_index": 0},
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = session_data["results"][0]
+        decisions = {d["issue_index"]: d["decision"] for d in result["decisions"]}
+
+        gt_box_issue_map = {}
+        class_conflict_map = {}
+        missing_label_map = {}
+
+        for issue_idx, issue in enumerate(result["comparison"]["issues"]):
+            issue_type = issue.get("type")
+            source = issue.get("source")
+
+            if issue_type == "class_conflict":
+                gt_box = issue.get("ground_truth", {})
+                if "box_index" in gt_box:
+                    gt_idx = gt_box["box_index"]
+                    gt_box_issue_map[gt_idx] = issue_idx
+                    class_conflict_map[gt_idx] = {
+                        "issue_idx": issue_idx,
+                        "issue": issue,
+                    }
+            elif issue_type == "missing_label":
+                if source == "detection":
+                    det_idx = issue.get("box_index")
+                    if det_idx is not None:
+                        missing_label_map[det_idx] = issue_idx
+            elif source == "ground_truth":
+                gt_idx = issue.get("box_index")
+                if gt_idx is not None and gt_idx not in gt_box_issue_map:
+                    gt_box_issue_map[gt_idx] = issue_idx
+
+        final_boxes = []
+
+        for gt_idx, gt_box in enumerate(result["ground_truth"]):
+            if gt_idx in class_conflict_map:
+                continue
+
+            if gt_idx in gt_box_issue_map:
+                issue_idx = gt_box_issue_map[gt_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "reject":
+                    continue
+
+            final_boxes.append({
+                "class_id": gt_box["class_id"],
+                "x_center": gt_box["x_center"],
+                "y_center": gt_box["y_center"],
+                "width": gt_box["width"],
+                "height": gt_box["height"],
+            })
+
+        for gt_idx in class_conflict_map:
+            if gt_idx >= len(result["ground_truth"]):
+                continue
+
+            gt_box = result["ground_truth"][gt_idx]
+            conflict_info = class_conflict_map[gt_idx]
+            issue_idx = conflict_info["issue_idx"]
+            issue = conflict_info["issue"]
+
+            if issue_idx in decisions:
+                decision = decisions[issue_idx]
+                if decision == "accept":
+                    det_info = issue.get("detection", {})
+                    box_info = det_info.get("box", {})
+                    final_boxes.append({
+                        "class_id": det_info.get("class_id", 0),
+                        "x_center": box_info.get("x_center", 0),
+                        "y_center": box_info.get("y_center", 0),
+                        "width": box_info.get("width", 0),
+                        "height": box_info.get("height", 0),
+                    })
+                elif decision == "reject":
+                    pass
+                else:
+                    final_boxes.append({
+                        "class_id": gt_box["class_id"],
+                        "x_center": gt_box["x_center"],
+                        "y_center": gt_box["y_center"],
+                        "width": gt_box["width"],
+                        "height": gt_box["height"],
+                    })
+            else:
+                final_boxes.append({
+                    "class_id": gt_box["class_id"],
+                    "x_center": gt_box["x_center"],
+                    "y_center": gt_box["y_center"],
+                    "width": gt_box["width"],
+                    "height": gt_box["height"],
+                })
+
+        for det_idx, det_box in enumerate(result["detections"]):
+            if det_idx in missing_label_map:
+                issue_idx = missing_label_map[det_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "accept":
+                    final_boxes.append({
+                        "class_id": det_box["class_id"],
+                        "x_center": det_box["x_center"],
+                        "y_center": det_box["y_center"],
+                        "width": det_box["width"],
+                        "height": det_box["height"],
+                    })
+
+        assert len(final_boxes) == 0
+
+    def test_missing_label_accept_should_add(self):
+        session_data = {
+            "results": [
+                {
+                    "image_key": "test",
+                    "ground_truth": [],
+                    "detections": [
+                        {
+                            "class_id": 0,
+                            "x_center": 0.5,
+                            "y_center": 0.5,
+                            "width": 0.2,
+                            "height": 0.2,
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "comparison": {
+                        "issues": [
+                            {
+                                "type": "missing_label",
+                                "source": "detection",
+                                "box_index": 0,
+                                "class_id": 0,
+                                "class_name": "person",
+                                "box": {
+                                    "x_center": 0.5,
+                                    "y_center": 0.5,
+                                    "width": 0.2,
+                                    "height": 0.2,
+                                },
+                            }
+                        ]
+                    },
+                    "decisions": [
+                        {
+                            "issue_index": 0,
+                            "decision": "accept",
+                            "issue": {
+                                "type": "missing_label",
+                                "source": "detection",
+                                "box_index": 0,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = session_data["results"][0]
+        decisions = {d["issue_index"]: d["decision"] for d in result["decisions"]}
+
+        gt_box_issue_map = {}
+        class_conflict_map = {}
+        missing_label_map = {}
+
+        for issue_idx, issue in enumerate(result["comparison"]["issues"]):
+            issue_type = issue.get("type")
+            source = issue.get("source")
+
+            if issue_type == "class_conflict":
+                gt_box = issue.get("ground_truth", {})
+                if "box_index" in gt_box:
+                    gt_idx = gt_box["box_index"]
+                    gt_box_issue_map[gt_idx] = issue_idx
+                    class_conflict_map[gt_idx] = {
+                        "issue_idx": issue_idx,
+                        "issue": issue,
+                    }
+            elif issue_type == "missing_label":
+                if source == "detection":
+                    det_idx = issue.get("box_index")
+                    if det_idx is not None:
+                        missing_label_map[det_idx] = issue_idx
+            elif source == "ground_truth":
+                gt_idx = issue.get("box_index")
+                if gt_idx is not None and gt_idx not in gt_box_issue_map:
+                    gt_box_issue_map[gt_idx] = issue_idx
+
+        final_boxes = []
+
+        for gt_idx, gt_box in enumerate(result["ground_truth"]):
+            if gt_idx in class_conflict_map:
+                continue
+
+            if gt_idx in gt_box_issue_map:
+                issue_idx = gt_box_issue_map[gt_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "reject":
+                    continue
+
+            final_boxes.append({
+                "class_id": gt_box["class_id"],
+                "x_center": gt_box["x_center"],
+                "y_center": gt_box["y_center"],
+                "width": gt_box["width"],
+                "height": gt_box["height"],
+            })
+
+        for gt_idx in class_conflict_map:
+            if gt_idx >= len(result["ground_truth"]):
+                continue
+
+            gt_box = result["ground_truth"][gt_idx]
+            conflict_info = class_conflict_map[gt_idx]
+            issue_idx = conflict_info["issue_idx"]
+            issue = conflict_info["issue"]
+
+            if issue_idx in decisions:
+                decision = decisions[issue_idx]
+                if decision == "accept":
+                    det_info = issue.get("detection", {})
+                    box_info = det_info.get("box", {})
+                    final_boxes.append({
+                        "class_id": det_info.get("class_id", 0),
+                        "x_center": box_info.get("x_center", 0),
+                        "y_center": box_info.get("y_center", 0),
+                        "width": box_info.get("width", 0),
+                        "height": box_info.get("height", 0),
+                    })
+                elif decision == "reject":
+                    pass
+                else:
+                    final_boxes.append({
+                        "class_id": gt_box["class_id"],
+                        "x_center": gt_box["x_center"],
+                        "y_center": gt_box["y_center"],
+                        "width": gt_box["width"],
+                        "height": gt_box["height"],
+                    })
+            else:
+                final_boxes.append({
+                    "class_id": gt_box["class_id"],
+                    "x_center": gt_box["x_center"],
+                    "y_center": gt_box["y_center"],
+                    "width": gt_box["width"],
+                    "height": gt_box["height"],
+                })
+
+        for det_idx, det_box in enumerate(result["detections"]):
+            if det_idx in missing_label_map:
+                issue_idx = missing_label_map[det_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "accept":
+                    final_boxes.append({
+                        "class_id": det_box["class_id"],
+                        "x_center": det_box["x_center"],
+                        "y_center": det_box["y_center"],
+                        "width": det_box["width"],
+                        "height": det_box["height"],
+                    })
+
+        assert len(final_boxes) == 1
+        assert final_boxes[0]["class_id"] == 0
+
+    def test_missing_label_reject_should_not_add(self):
+        session_data = {
+            "results": [
+                {
+                    "image_key": "test",
+                    "ground_truth": [],
+                    "detections": [
+                        {
+                            "class_id": 0,
+                            "x_center": 0.5,
+                            "y_center": 0.5,
+                            "width": 0.2,
+                            "height": 0.2,
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "comparison": {
+                        "issues": [
+                            {
+                                "type": "missing_label",
+                                "source": "detection",
+                                "box_index": 0,
+                                "class_id": 0,
+                                "class_name": "person",
+                                "box": {
+                                    "x_center": 0.5,
+                                    "y_center": 0.5,
+                                    "width": 0.2,
+                                    "height": 0.2,
+                                },
+                            }
+                        ]
+                    },
+                    "decisions": [
+                        {
+                            "issue_index": 0,
+                            "decision": "reject",
+                            "issue": {
+                                "type": "missing_label",
+                                "source": "detection",
+                                "box_index": 0,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = session_data["results"][0]
+        decisions = {d["issue_index"]: d["decision"] for d in result["decisions"]}
+
+        gt_box_issue_map = {}
+        class_conflict_map = {}
+        missing_label_map = {}
+
+        for issue_idx, issue in enumerate(result["comparison"]["issues"]):
+            issue_type = issue.get("type")
+            source = issue.get("source")
+
+            if issue_type == "class_conflict":
+                gt_box = issue.get("ground_truth", {})
+                if "box_index" in gt_box:
+                    gt_idx = gt_box["box_index"]
+                    gt_box_issue_map[gt_idx] = issue_idx
+                    class_conflict_map[gt_idx] = {
+                        "issue_idx": issue_idx,
+                        "issue": issue,
+                    }
+            elif issue_type == "missing_label":
+                if source == "detection":
+                    det_idx = issue.get("box_index")
+                    if det_idx is not None:
+                        missing_label_map[det_idx] = issue_idx
+            elif source == "ground_truth":
+                gt_idx = issue.get("box_index")
+                if gt_idx is not None and gt_idx not in gt_box_issue_map:
+                    gt_box_issue_map[gt_idx] = issue_idx
+
+        final_boxes = []
+
+        for gt_idx, gt_box in enumerate(result["ground_truth"]):
+            if gt_idx in class_conflict_map:
+                continue
+
+            if gt_idx in gt_box_issue_map:
+                issue_idx = gt_box_issue_map[gt_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "reject":
+                    continue
+
+            final_boxes.append({
+                "class_id": gt_box["class_id"],
+                "x_center": gt_box["x_center"],
+                "y_center": gt_box["y_center"],
+                "width": gt_box["width"],
+                "height": gt_box["height"],
+            })
+
+        for gt_idx in class_conflict_map:
+            if gt_idx >= len(result["ground_truth"]):
+                continue
+
+            gt_box = result["ground_truth"][gt_idx]
+            conflict_info = class_conflict_map[gt_idx]
+            issue_idx = conflict_info["issue_idx"]
+            issue = conflict_info["issue"]
+
+            if issue_idx in decisions:
+                decision = decisions[issue_idx]
+                if decision == "accept":
+                    det_info = issue.get("detection", {})
+                    box_info = det_info.get("box", {})
+                    final_boxes.append({
+                        "class_id": det_info.get("class_id", 0),
+                        "x_center": box_info.get("x_center", 0),
+                        "y_center": box_info.get("y_center", 0),
+                        "width": box_info.get("width", 0),
+                        "height": box_info.get("height", 0),
+                    })
+                elif decision == "reject":
+                    pass
+                else:
+                    final_boxes.append({
+                        "class_id": gt_box["class_id"],
+                        "x_center": gt_box["x_center"],
+                        "y_center": gt_box["y_center"],
+                        "width": gt_box["width"],
+                        "height": gt_box["height"],
+                    })
+            else:
+                final_boxes.append({
+                    "class_id": gt_box["class_id"],
+                    "x_center": gt_box["x_center"],
+                    "y_center": gt_box["y_center"],
+                    "width": gt_box["width"],
+                    "height": gt_box["height"],
+                })
+
+        for det_idx, det_box in enumerate(result["detections"]):
+            if det_idx in missing_label_map:
+                issue_idx = missing_label_map[det_idx]
+                if issue_idx in decisions and decisions[issue_idx] == "accept":
+                    final_boxes.append({
+                        "class_id": det_box["class_id"],
+                        "x_center": det_box["x_center"],
+                        "y_center": det_box["y_center"],
+                        "width": det_box["width"],
+                        "height": det_box["height"],
+                    })
+
+        assert len(final_boxes) == 0

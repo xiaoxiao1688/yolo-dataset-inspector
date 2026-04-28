@@ -20,6 +20,9 @@ const elements = {
   runQaButton: document.querySelector("#run-qa-button"),
   sessionId: document.querySelector("#session-id"),
   statusLine: document.querySelector("#status-line"),
+  previewCanvas: document.querySelector("#preview-canvas"),
+  previewEmpty: document.querySelector("#preview-empty"),
+  previewHint: document.querySelector("#preview-hint"),
 };
 
 const state = {
@@ -29,6 +32,15 @@ const state = {
   results: [],
   selectedImageKey: null,
   selectedResult: null,
+  selectedIssueIndex: null,
+  canvasImage: null,
+  canvasScale: 1,
+};
+
+const BOX_COLORS = {
+  gt: { stroke: "#0088cc", fill: "rgba(0, 136, 204, 0.1)" },
+  detection: { stroke: "#22c55e", fill: "rgba(34, 197, 94, 0.1)" },
+  highlight: { stroke: "#f97316", fill: "rgba(249, 115, 22, 0.2)" },
 };
 
 function setStatus(message, type = "info") {
@@ -83,6 +95,182 @@ function formatBox(box) {
   return `x: ${box.x_center?.toFixed(4) || "?"}, y: ${box.y_center?.toFixed(4) || "?"}, w: ${box.width?.toFixed(4) || "?"}, h: ${box.height?.toFixed(4) || "?"}`;
 }
 
+function yoloToPixels(box, imgWidth, imgHeight, canvasWidth, canvasHeight) {
+  const scaleX = canvasWidth / imgWidth;
+  const scaleY = canvasHeight / imgHeight;
+
+  const x_center = box.x_center * imgWidth * scaleX;
+  const y_center = box.y_center * imgHeight * scaleY;
+  const width = box.width * imgWidth * scaleX;
+  const height = box.height * imgHeight * scaleY;
+
+  return {
+    x: x_center - width / 2,
+    y: y_center - height / 2,
+    width: width,
+    height: height,
+  };
+}
+
+function drawBox(ctx, rect, colors, label = "", lineWidth = 2) {
+  ctx.strokeStyle = colors.stroke;
+  ctx.fillStyle = colors.fill;
+  ctx.lineWidth = lineWidth;
+
+  ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+
+  if (label) {
+    ctx.font = "bold 12px sans-serif";
+    const textMetrics = ctx.measureText(label);
+    const textWidth = textMetrics.width + 8;
+    const textHeight = 18;
+
+    ctx.fillStyle = colors.stroke;
+    ctx.fillRect(rect.x, rect.y - textHeight, textWidth, textHeight);
+
+    ctx.fillStyle = "white";
+    ctx.fillText(label, rect.x + 4, rect.y - 5);
+  }
+}
+
+function clearCanvas() {
+  const canvas = elements.previewCanvas;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+async function renderPreview() {
+  if (!state.selectedResult) {
+    elements.previewCanvas.style.display = "none";
+    elements.previewEmpty.style.display = "flex";
+    elements.previewHint.textContent = "Select an image to preview with boxes.";
+    return;
+  }
+
+  const result = state.selectedResult;
+  const imageFilename = result.image_filename;
+  const imgWidth = result.image_info.width;
+  const imgHeight = result.image_info.height;
+
+  elements.previewHint.textContent = `${result.image_info.filename} (${imgWidth} × ${imgHeight})`;
+
+  try {
+    const imageUrl = `/api/qa/image/${state.sessionId}/${imageFilename}`;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = imageUrl;
+    });
+
+    const canvas = elements.previewCanvas;
+    const container = canvas.parentElement;
+
+    const maxWidth = container.clientWidth - 32;
+    const maxHeight = Math.min(500, window.innerHeight * 0.4);
+
+    let scale = 1;
+    if (imgWidth > maxWidth) {
+      scale = maxWidth / imgWidth;
+    }
+    const scaledHeight = imgHeight * scale;
+    if (scaledHeight > maxHeight) {
+      scale = maxHeight / imgHeight;
+    }
+
+    const canvasWidth = Math.max(1, Math.floor(imgWidth * scale));
+    const canvasHeight = Math.max(1, Math.floor(imgHeight * scale));
+
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    state.canvasScale = scale;
+    state.canvasImage = img;
+
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+    ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight);
+
+    const groundTruth = result.ground_truth || [];
+    const detections = result.detections || [];
+
+    groundTruth.forEach((box, index) => {
+      const rect = yoloToPixels(box, imgWidth, imgHeight, canvasWidth, canvasHeight);
+      const label = `GT #${index + 1}`;
+      drawBox(ctx, rect, BOX_COLORS.gt, label);
+    });
+
+    detections.forEach((box, index) => {
+      const rect = yoloToPixels(box, imgWidth, imgHeight, canvasWidth, canvasHeight);
+      const label = `Det #${index + 1} (${(box.confidence * 100).toFixed(0)}%)`;
+      drawBox(ctx, rect, BOX_COLORS.detection, label);
+    });
+
+    if (state.selectedIssueIndex !== null) {
+      highlightIssueBox(state.selectedIssueIndex);
+    }
+
+    elements.previewCanvas.style.display = "block";
+    elements.previewEmpty.style.display = "none";
+  } catch (error) {
+    console.error("Failed to render preview:", error);
+    elements.previewHint.textContent = "Failed to load image: " + error.message;
+  }
+}
+
+function highlightIssueBox(issueIndex) {
+  if (!state.selectedResult || !state.canvasImage) {
+    return;
+  }
+
+  const result = state.selectedResult;
+  const issues = result.comparison.issues;
+  if (issueIndex < 0 || issueIndex >= issues.length) {
+    return;
+  }
+
+  const issue = issues[issueIndex];
+  const imgWidth = result.image_info.width;
+  const imgHeight = result.image_info.height;
+  const canvas = elements.previewCanvas;
+  const ctx = canvas.getContext("2d");
+
+  if (issue.type === "missing_label") {
+    const rect = yoloToPixels(issue.box, imgWidth, imgHeight, canvas.width, canvas.height);
+    drawBox(ctx, rect, BOX_COLORS.highlight, "Selected (Det)", 3);
+  } else if (issue.type === "class_conflict") {
+    if (issue.ground_truth && issue.ground_truth.box) {
+      const rect = yoloToPixels(issue.ground_truth.box, imgWidth, imgHeight, canvas.width, canvas.height);
+      drawBox(ctx, rect, BOX_COLORS.highlight, "Selected (GT)", 3);
+    }
+    if (issue.detection && issue.detection.box) {
+      const rect = yoloToPixels(issue.detection.box, imgWidth, imgHeight, canvas.width, canvas.height);
+      drawBox(ctx, rect, BOX_COLORS.highlight, "Selected (Det)", 3);
+    }
+  } else if (issue.source === "ground_truth" && issue.box) {
+    const rect = yoloToPixels(issue.box, imgWidth, imgHeight, canvas.width, canvas.height);
+    drawBox(ctx, rect, BOX_COLORS.highlight, "Selected (GT)", 3);
+  }
+}
+
+function selectIssue(issueIndex) {
+  state.selectedIssueIndex = issueIndex;
+
+  document.querySelectorAll("#issue-detail-panel .issue-card").forEach((card, index) => {
+    if (index === issueIndex) {
+      card.classList.add("highlighted");
+    } else {
+      card.classList.remove("highlighted");
+    }
+  });
+
+  if (state.canvasImage) {
+    renderPreview();
+  }
+}
+
 function renderImageList() {
   if (!state.results.length) {
     elements.imageList.innerHTML = '<li class="empty-state">Processed images will appear here. Click to view details.</li>';
@@ -124,9 +312,11 @@ function renderImageList() {
 function selectImage(imageKey) {
   state.selectedImageKey = imageKey;
   state.selectedResult = state.results.find((r) => r.image_key === imageKey);
+  state.selectedIssueIndex = null;
 
   renderImageList();
   renderIssueDetails();
+  renderPreview();
 }
 
 function renderIssueDetails() {
@@ -151,6 +341,7 @@ function renderIssueDetails() {
   elements.issueDetailPanel.innerHTML = issues
     .map((issue, index) => {
       const isDecided = decidedIndices.has(index);
+      const isHighlighted = state.selectedIssueIndex === index;
       const decision = decisions.find((d) => d.issue_index === index);
 
       let issueContent = "";
@@ -234,7 +425,7 @@ function renderIssueDetails() {
       }
 
       return `
-        <div class="issue-card ${getIssueTypeClass(issue.type)} ${isDecided ? "decided" : ""}">
+        <div class="issue-card ${getIssueTypeClass(issue.type)} ${isDecided ? "decided" : ""} ${isHighlighted ? "highlighted" : ""}" data-issue-index="${index}">
           <div class="issue-header">
             <span class="issue-type-badge">${getIssueTypeLabel(issue.type)}</span>
             <span class="issue-index">#${index + 1}</span>
@@ -247,8 +438,19 @@ function renderIssueDetails() {
     })
     .join("");
 
+  document.querySelectorAll("#issue-detail-panel .issue-card").forEach((card) => {
+    card.addEventListener("click", (event) => {
+      if (event.target.tagName === "BUTTON") {
+        return;
+      }
+      const index = parseInt(card.dataset.issueIndex, 10);
+      selectIssue(index);
+    });
+  });
+
   document.querySelectorAll("#issue-detail-panel button[data-index]").forEach((button) => {
-    button.addEventListener("click", async () => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
       const index = parseInt(button.dataset.index, 10);
       const decision = button.dataset.decision;
       await submitDecision(index, decision);
@@ -419,6 +621,7 @@ async function runQA() {
     state.results = payload.results;
     state.selectedImageKey = null;
     state.selectedResult = null;
+    state.selectedIssueIndex = null;
 
     elements.sessionId.textContent = state.sessionId;
     elements.exportLabelsButton.disabled = false;
@@ -428,6 +631,9 @@ async function runQA() {
     renderImageList();
     renderIssueDetails();
     renderDecisionSummary();
+    clearCanvas();
+    elements.previewCanvas.style.display = "none";
+    elements.previewEmpty.style.display = "flex";
 
     const summary = payload.summary;
     if (summary.total_issues > 0) {
@@ -440,18 +646,6 @@ async function runQA() {
   } finally {
     elements.runQaButton.disabled = false;
   }
-}
-
-function downloadJson(filename, payload) {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
 }
 
 elements.imageInput.addEventListener("change", (event) => {
@@ -486,6 +680,12 @@ elements.exportAuditButton.addEventListener("click", () => {
   }
   window.open(`/api/qa/export/audit/${state.sessionId}`, "_blank");
   setStatus("Exporting audit report...");
+});
+
+window.addEventListener("resize", () => {
+  if (state.selectedResult && state.canvasImage) {
+    renderPreview();
+  }
 });
 
 updateMetrics();
