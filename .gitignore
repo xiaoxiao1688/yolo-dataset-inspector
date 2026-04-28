@@ -1,4 +1,11 @@
 .venv/
 __pycache__/
-data/*
-!data/.gitkeep
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ultralytics/
+dist/
+build/
+*.log
+models/*.pt
