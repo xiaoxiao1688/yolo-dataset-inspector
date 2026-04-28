@@ -2,7 +2,6 @@ from flask import Flask, jsonify, render_template, request, send_file
 from io import BytesIO
 import json
 import uuid
-from pathlib import Path
 
 from repair_workbench.scanner import scan_dataset
 from repair_workbench.yolo_runtime import environment_summary
@@ -63,16 +62,14 @@ def qa_process():
 
     label_map = {}
     for label_file in label_files:
-        from pathlib import Path
-        key = Path(label_file.filename).stem.lower()
+        key = label_file.filename.rsplit(".", 1)[0].lower()
         label_map[key] = label_file
 
     session_id = generate_session_id()
     results = []
 
     for image_file in image_files:
-        from pathlib import Path
-        image_key = Path(image_file.filename).stem.lower()
+        image_key = image_file.filename.rsplit(".", 1)[0].lower()
         label_file = label_map.get(image_key)
 
         try:
@@ -143,11 +140,22 @@ def qa_set_decision():
     if decision not in ["accept", "reject", "keep"]:
         return jsonify({"error": "Invalid decision. Use 'accept', 'reject', or 'keep'"}), 400
 
-    result["decisions"].append({
+    existing_idx = None
+    for i, d in enumerate(result["decisions"]):
+        if d["issue_index"] == issue_index:
+            existing_idx = i
+            break
+
+    new_decision = {
         "issue_index": issue_index,
         "decision": decision,
         "issue": result["comparison"]["issues"][issue_index],
-    })
+    }
+
+    if existing_idx is not None:
+        result["decisions"][existing_idx] = new_decision
+    else:
+        result["decisions"].append(new_decision)
 
     return jsonify({"status": "ok", "message": f"Decision '{decision}' recorded"})
 
@@ -157,15 +165,28 @@ def build_final_labels(session):
 
     for result in session["results"]:
         image_key = result["image_key"]
-        class_names = result["class_names"]
-        img_width = result["image_info"]["width"]
-        img_height = result["image_info"]["height"]
-
         final_boxes = []
 
         decisions = {d["issue_index"]: d["decision"] for d in result["decisions"]}
 
+        class_conflict_gt_indices = set()
+        class_conflict_decisions = {}
+
+        for issue_idx, issue in enumerate(result["comparison"]["issues"]):
+            if issue.get("type") == "class_conflict":
+                if issue_idx in decisions:
+                    gt_box = issue.get("ground_truth", {})
+                    if "box_index" in gt_box:
+                        class_conflict_gt_indices.add(gt_box["box_index"])
+                        class_conflict_decisions[gt_box["box_index"]] = {
+                            "decision": decisions[issue_idx],
+                            "issue": issue,
+                        }
+
         for gt_idx, gt_box in enumerate(result["ground_truth"]):
+            if gt_idx in class_conflict_gt_indices:
+                continue
+
             keep_gt = True
 
             for issue_idx, issue in enumerate(result["comparison"]["issues"]):
@@ -176,6 +197,42 @@ def build_final_labels(session):
                         break
 
             if keep_gt:
+                final_boxes.append({
+                    "class_id": gt_box["class_id"],
+                    "x_center": gt_box["x_center"],
+                    "y_center": gt_box["y_center"],
+                    "width": gt_box["width"],
+                    "height": gt_box["height"],
+                })
+
+        for gt_idx in class_conflict_gt_indices:
+            if gt_idx >= len(result["ground_truth"]):
+                continue
+
+            gt_box = result["ground_truth"][gt_idx]
+            decision_info = class_conflict_decisions.get(gt_idx, {})
+            decision = decision_info.get("decision")
+            issue = decision_info.get("issue", {})
+
+            if decision == "accept":
+                det_info = issue.get("detection", {})
+                box_info = det_info.get("box", {})
+                final_boxes.append({
+                    "class_id": det_info.get("class_id", 0),
+                    "x_center": box_info.get("x_center", 0),
+                    "y_center": box_info.get("y_center", 0),
+                    "width": box_info.get("width", 0),
+                    "height": box_info.get("height", 0),
+                })
+            elif decision == "keep":
+                final_boxes.append({
+                    "class_id": gt_box["class_id"],
+                    "x_center": gt_box["x_center"],
+                    "y_center": gt_box["y_center"],
+                    "width": gt_box["width"],
+                    "height": gt_box["height"],
+                })
+            else:
                 final_boxes.append({
                     "class_id": gt_box["class_id"],
                     "x_center": gt_box["x_center"],
@@ -201,29 +258,6 @@ def build_final_labels(session):
                     "width": det_box["width"],
                     "height": det_box["height"],
                 })
-
-        for issue_idx, issue in enumerate(result["comparison"]["issues"]):
-            if issue.get("type") == "class_conflict":
-                if issue_idx in decisions:
-                    decision = decisions[issue_idx]
-                    if decision == "accept":
-                        det_info = issue.get("detection", {})
-                        final_boxes.append({
-                            "class_id": det_info.get("class_id", 0),
-                            "x_center": det_info.get("box", {}).get("x_center", 0),
-                            "y_center": det_info.get("box", {}).get("y_center", 0),
-                            "width": det_info.get("box", {}).get("width", 0),
-                            "height": det_info.get("box", {}).get("height", 0),
-                        })
-                    elif decision == "keep":
-                        gt_info = issue.get("ground_truth", {})
-                        final_boxes.append({
-                            "class_id": gt_info.get("class_id", 0),
-                            "x_center": gt_info.get("box", {}).get("x_center", 0),
-                            "y_center": gt_info.get("box", {}).get("y_center", 0),
-                            "width": gt_info.get("box", {}).get("width", 0),
-                            "height": gt_info.get("box", {}).get("height", 0),
-                        })
 
         all_labels[image_key] = {
             "boxes": final_boxes,

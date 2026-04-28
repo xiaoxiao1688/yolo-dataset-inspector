@@ -58,11 +58,11 @@ function updateMetrics() {
 
 function getIssueTypeLabel(type) {
   const labels = {
-    missing_label: "漏标",
-    class_conflict: "类别冲突",
-    anomalous_box: "异常框",
-    possibly_wrong_label: "可能错标",
-    unmatched_ground_truth: "未匹配原标签",
+    missing_label: "Missing Label",
+    class_conflict: "Class Conflict",
+    anomalous_box: "Anomalous Box",
+    possibly_wrong_label: "Possibly Wrong",
+    unmatched_ground_truth: "Unmatched GT",
   };
   return labels[type] || type;
 }
@@ -288,11 +288,26 @@ async function submitDecision(issueIndex, decision) {
       if (!result.decisions) {
         result.decisions = [];
       }
-      result.decisions.push({
+
+      let existingIndex = -1;
+      for (let i = 0; i < result.decisions.length; i++) {
+        if (result.decisions[i].issue_index === issueIndex) {
+          existingIndex = i;
+          break;
+        }
+      }
+
+      const newDecision = {
         issue_index: issueIndex,
         decision: decision,
         issue: result.comparison.issues[issueIndex],
-      });
+      };
+
+      if (existingIndex >= 0) {
+        result.decisions[existingIndex] = newDecision;
+      } else {
+        result.decisions.push(newDecision);
+      }
     }
 
     setStatus(`Decision "${decision}" recorded.`);

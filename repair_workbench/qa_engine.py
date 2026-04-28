@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from io import BytesIO
-from pathlib import Path
 
 import numpy as np
 from PIL import Image
@@ -174,7 +173,7 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
                     "width": gt_box["width"],
                     "height": gt_box["height"],
                 },
-                "reason": "异常框：尺寸或比例异常",
+                "reason": "Anomalous box: size or aspect ratio is abnormal",
             })
 
         best_iou = 0
@@ -203,12 +202,14 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
 
             if not best_class_match:
                 det_box = detections[best_det_idx]
+                gt_class_name = class_names[gt_box["class_id"]] if gt_box["class_id"] < len(class_names) else f"class_{gt_box['class_id']}"
+                det_class_name = class_names[det_box["class_id"]] if det_box["class_id"] < len(class_names) else f"class_{det_box['class_id']}"
                 issues.append({
                     "type": "class_conflict",
                     "source": "mismatch",
                     "ground_truth": {
                         "class_id": gt_box["class_id"],
-                        "class_name": class_names[gt_box["class_id"]] if gt_box["class_id"] < len(class_names) else f"class_{gt_box['class_id']}",
+                        "class_name": gt_class_name,
                         "box": {
                             "x_center": gt_box["x_center"],
                             "y_center": gt_box["y_center"],
@@ -218,7 +219,7 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
                     },
                     "detection": {
                         "class_id": det_box["class_id"],
-                        "class_name": class_names[det_box["class_id"]] if det_box["class_id"] < len(class_names) else f"class_{det_box['class_id']}",
+                        "class_name": det_class_name,
                         "box": {
                             "x_center": det_box["x_center"],
                             "y_center": det_box["y_center"],
@@ -228,7 +229,7 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
                         "confidence": det_box["confidence"],
                     },
                     "iou": best_iou,
-                    "reason": f"类别冲突：原标签为 {class_names[gt_box['class_id']] if gt_box['class_id'] < len(class_names) else f'class_{gt_box[\"class_id\"]}'}，模型建议为 {class_names[det_box['class_id']] if det_box['class_id'] < len(class_names) else f'class_{det_box[\"class_id\"]}'}",
+                    "reason": f"Class conflict: ground truth is '{gt_class_name}', model suggests '{det_class_name}'",
                 })
         elif best_iou < iou_threshold:
             issues.append({
@@ -244,7 +245,7 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
                     "height": gt_box["height"],
                 },
                 "best_iou": best_iou,
-                "reason": f"可能错标：模型未找到匹配的检测框（最佳 IoU: {best_iou:.3f}）",
+                "reason": f"Possibly wrong label: no matching detection found (best IoU: {best_iou:.3f})",
             })
 
     for gt_idx, gt_box in enumerate(ground_truth):
@@ -261,17 +262,18 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
                     "width": gt_box["width"],
                     "height": gt_box["height"],
                 },
-                "reason": "原标签框未被模型匹配，可能是错标或模型漏检",
+                "reason": "Unmatched ground truth: possibly wrong label or model missed detection",
             })
 
     for det_idx, det_box in enumerate(detections):
         if det_idx not in matched_det:
+            det_class_name = class_names[det_box["class_id"]] if det_box["class_id"] < len(class_names) else f"class_{det_box['class_id']}"
             issues.append({
                 "type": "missing_label",
                 "source": "detection",
                 "box_index": det_idx,
                 "class_id": det_box["class_id"],
-                "class_name": class_names[det_box["class_id"]] if det_box["class_id"] < len(class_names) else f"class_{det_box['class_id']}",
+                "class_name": det_class_name,
                 "box": {
                     "x_center": det_box["x_center"],
                     "y_center": det_box["y_center"],
@@ -279,7 +281,7 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
                     "height": det_box["height"],
                 },
                 "confidence": det_box["confidence"],
-                "reason": f"漏标建议：模型检测到 {class_names[det_box['class_id']] if det_box['class_id'] < len(class_names) else f'class_{det_box[\"class_id\"]}'}（置信度: {det_box['confidence']:.3f}）",
+                "reason": f"Missing label suggestion: model detected '{det_class_name}' (confidence: {det_box['confidence']:.3f})",
             })
 
     return {
@@ -292,8 +294,6 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
 
 def process_qa_task(image_file, label_file, classes_text, conf_threshold=0.25, iou_threshold=0.45):
     class_names = parse_class_names(classes_text)
-    if not class_names:
-        class_names = [f"class_{i}" for i in range(80)]
 
     image_data = image_file.read()
     try:
