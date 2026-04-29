@@ -3,69 +3,71 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>GeoDraft YOLO QA</title>
+    <title>YOLO Auto Label QA Studio</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}" />
   </head>
   <body>
     <main class="app-shell">
       <section class="hero">
         <div>
-          <p class="eyebrow">YOLO DATASET QA</p>
-          <h1>Import labels, inspect issues, preview overlays</h1>
+          <p class="eyebrow">YOLO AUTO LABEL QA STUDIO</p>
+          <h1>Detect, Compare, and Fix Label Quality Issues</h1>
           <p class="hero-copy">
-            This build focuses on browser-side dataset inspection for YOLO detect and segment formats.
+            Import images, classes, and optional existing labels. Run local YOLO inference to generate candidate boxes.
+            Compare ground truth with model suggestions to identify missing labels, wrong labels, class conflicts, and anomalous boxes.
           </p>
         </div>
         <div class="hero-meta">
           <div class="meta-card">
-            <span class="meta-label">Mode</span>
-            <strong id="hero-task-type">Detect</strong>
-          </div>
-          <div class="meta-card">
             <span class="meta-label">Health</span>
             <strong id="hero-health">Ready</strong>
+          </div>
+          <div class="meta-card">
+            <span class="meta-label">Session</span>
+            <strong id="session-id">None</strong>
           </div>
         </div>
       </section>
 
       <section class="panel controls-panel">
         <div class="panel-head">
-          <h2>Dataset Inputs</h2>
-          <p id="status-line" class="status-line">Select images and label files, then run analysis.</p>
+          <div>
+            <h2>QA Inputs</h2>
+            <p id="status-line" class="panel-hint">Upload images, optional labels, and configure classes.</p>
+          </div>
+          <div class="button-group">
+            <button id="export-labels-button" class="ghost" type="button" disabled>Export Labels</button>
+            <button id="export-audit-button" class="ghost" type="button" disabled>Export Audit</button>
+          </div>
         </div>
-
         <div class="controls-grid">
-          <label class="field">
-            <span>YOLO task</span>
-            <select id="task-type">
-              <option value="detect">Detect</option>
-              <option value="segment">Segment</option>
-            </select>
-          </label>
-
           <label class="field">
             <span>Image files</span>
             <input id="image-input" type="file" accept="image/*" multiple />
           </label>
-
           <label class="field">
-            <span>Label files</span>
+            <span>Label files (optional)</span>
             <input id="label-input" type="file" accept=".txt,text/plain" multiple />
           </label>
-
+          <label class="field">
+            <span>Confidence threshold</span>
+            <input id="conf-threshold" type="number" min="0.01" max="0.99" step="0.01" value="0.25" />
+          </label>
+          <label class="field">
+            <span>IoU threshold</span>
+            <input id="iou-threshold" type="number" min="0.1" max="0.9" step="0.05" value="0.45" />
+          </label>
           <label class="field field-wide">
-            <span>Class names</span>
-            <textarea
-              id="class-names"
-              rows="4"
-              placeholder="One class per line, for example:&#10;crack&#10;spall&#10;leak"
-            ></textarea>
+            <span>Class names (one per line, optional)</span>
+            <textarea id="class-names" rows="5" placeholder="person
+bicycle
+car
+motorcycle
+airplane"></textarea>
           </label>
         </div>
-
         <div class="action-row">
-          <button id="analyze-button" class="primary" type="button">Analyze dataset</button>
-          <button id="export-report-button" class="ghost" type="button">Export JSON report</button>
+          <button id="run-qa-button" class="primary" type="button">Run QA Detection</button>
         </div>
       </section>
 
@@ -75,12 +77,12 @@
           <strong id="metric-images">0</strong>
         </article>
         <article class="metric-card">
-          <span class="metric-label">Labels</span>
-          <strong id="metric-labels">0</strong>
+          <span class="metric-label">Ground Truth</span>
+          <strong id="metric-gt">0</strong>
         </article>
         <article class="metric-card">
-          <span class="metric-label">Matched pairs</span>
-          <strong id="metric-pairs">0</strong>
+          <span class="metric-label">Model Detections</span>
+          <strong id="metric-det">0</strong>
         </article>
         <article class="metric-card danger">
           <span class="metric-label">Issues</span>
@@ -88,44 +90,60 @@
         </article>
       </section>
 
+      <section class="workspace-main">
+        <section class="panel preview-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Image Preview</h2>
+              <p id="preview-hint" class="panel-hint">Select an image to preview with boxes.</p>
+            </div>
+            <div class="legend-group">
+              <span class="legend-item legend-gt">Ground Truth</span>
+              <span class="legend-item legend-det">Model Detection</span>
+              <span class="legend-item legend-highlight">Selected</span>
+            </div>
+          </div>
+          <div class="preview-container">
+            <canvas id="preview-canvas"></canvas>
+            <div id="preview-empty" class="empty-state">Select an image from the left to preview.</div>
+          </div>
+        </section>
+      </section>
+
       <section class="workspace-grid">
-        <article class="panel file-panel">
+        <article class="panel">
           <div class="panel-head">
-            <h2>Dataset Inventory</h2>
-            <p id="inventory-hint" class="panel-hint">No analysis yet.</p>
+            <div>
+              <h2>Images</h2>
+              <p id="image-hint" class="panel-hint">No images processed yet.</p>
+            </div>
           </div>
-          <ul id="file-list" class="stack-list">
-            <li class="empty-state">Run analysis to build the dataset list.</li>
+          <ul id="image-list" class="stack-list">
+            <li class="empty-state">Processed images will appear here. Click to view details.</li>
           </ul>
         </article>
 
-        <article class="panel issues-panel">
+        <article class="panel">
           <div class="panel-head">
-            <h2>Issue Feed</h2>
-            <p id="issue-hint" class="panel-hint">No issues reported yet.</p>
+            <div>
+              <h2>Issue Details</h2>
+              <p id="issue-detail-hint" class="panel-hint">Select an image to view issues.</p>
+            </div>
           </div>
-          <ul id="issue-list" class="stack-list">
-            <li class="empty-state">Dataset issues will appear here.</li>
-          </ul>
+          <div id="issue-detail-panel" class="issue-detail-container">
+            <div class="empty-state">Select an image from the left to view detailed issues and make decisions.</div>
+          </div>
         </article>
 
-        <article class="panel preview-panel">
+        <article class="panel">
           <div class="panel-head">
-            <h2>Preview</h2>
-            <p id="preview-name" class="panel-hint">Nothing selected.</p>
-          </div>
-          <div class="preview-stage">
-            <canvas id="preview-canvas" width="960" height="640"></canvas>
-          </div>
-          <div class="preview-meta">
             <div>
-              <span class="meta-label">Image</span>
-              <strong id="preview-image-meta">-</strong>
+              <h2>Decision Summary</h2>
+              <p id="decision-hint" class="panel-hint">No decisions made yet.</p>
             </div>
-            <div>
-              <span class="meta-label">Labels</span>
-              <strong id="preview-label-meta">-</strong>
-            </div>
+          </div>
+          <div id="decision-panel" class="decision-container">
+            <div class="empty-state">Accept or reject suggestions to populate this panel.</div>
           </div>
         </article>
       </section>
