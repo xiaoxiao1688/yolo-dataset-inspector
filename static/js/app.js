@@ -73,7 +73,6 @@ function getIssueTypeLabel(type) {
     missing_label: "Missing Label",
     class_conflict: "Class Conflict",
     anomalous_box: "Anomalous Box",
-    possibly_wrong_label: "Possibly Wrong",
     unmatched_ground_truth: "Unmatched GT",
   };
   return labels[type] || type;
@@ -84,10 +83,63 @@ function getIssueTypeClass(type) {
     missing_label: "issue-missing",
     class_conflict: "issue-conflict",
     anomalous_box: "issue-anomalous",
-    possibly_wrong_label: "issue-warning",
     unmatched_ground_truth: "issue-warning",
   };
   return classes[type] || "issue-default";
+}
+
+const STORAGE_KEY = "geodraft_qa_session";
+
+function saveSessionToStorage() {
+  if (state.sessionId) {
+    localStorage.setItem(STORAGE_KEY, state.sessionId);
+  }
+}
+
+function clearSessionFromStorage() {
+  localStorage.removeItem(STORAGE_KEY);
+}
+
+async function restoreSessionFromStorage() {
+  const savedSessionId = localStorage.getItem(STORAGE_KEY);
+  if (!savedSessionId) {
+    return false;
+  }
+
+  try {
+    setStatus("Restoring session...");
+    const response = await fetch(`/api/qa/session/${savedSessionId}`);
+    if (!response.ok) {
+      clearSessionFromStorage();
+      setStatus("Session expired. Please upload files again.");
+      return false;
+    }
+
+    const sessionData = await response.json();
+    state.sessionId = sessionData.session_id;
+    state.results = sessionData.results || [];
+    state.selectedImageKey = null;
+    state.selectedResult = null;
+    state.selectedIssueIndex = null;
+
+    elements.sessionId.textContent = state.sessionId;
+    elements.exportLabelsButton.disabled = false;
+    elements.exportAuditButton.disabled = false;
+
+    updateMetrics();
+    renderImageList();
+    renderIssueDetails();
+    renderDecisionSummary();
+    clearCanvas();
+
+    setStatus(`Session restored: ${state.results.length} images loaded.`);
+    return true;
+  } catch (error) {
+    console.error("Failed to restore session:", error);
+    clearSessionFromStorage();
+    setStatus("Failed to restore session. Please upload files again.");
+    return false;
+  }
 }
 
 function formatBox(box) {
@@ -627,6 +679,8 @@ async function runQA() {
     elements.exportLabelsButton.disabled = false;
     elements.exportAuditButton.disabled = false;
 
+    saveSessionToStorage();
+
     updateMetrics();
     renderImageList();
     renderIssueDetails();
@@ -689,3 +743,10 @@ window.addEventListener("resize", () => {
 });
 
 updateMetrics();
+
+(async () => {
+  const restored = await restoreSessionFromStorage();
+  if (!restored) {
+    setStatus("Ready. Upload images and labels to begin QA.");
+  }
+})();

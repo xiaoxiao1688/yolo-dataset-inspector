@@ -208,6 +208,7 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
                     "type": "class_conflict",
                     "source": "mismatch",
                     "ground_truth": {
+                        "box_index": gt_idx,
                         "class_id": gt_box["class_id"],
                         "class_name": gt_class_name,
                         "box": {
@@ -231,22 +232,6 @@ def compare_labels(ground_truth, detections, img_width, img_height, class_names,
                     "iou": best_iou,
                     "reason": f"Class conflict: ground truth is '{gt_class_name}', model suggests '{det_class_name}'",
                 })
-        elif best_iou < iou_threshold:
-            issues.append({
-                "type": "possibly_wrong_label",
-                "source": "ground_truth",
-                "box_index": gt_idx,
-                "class_id": gt_box["class_id"],
-                "class_name": class_names[gt_box["class_id"]] if gt_box["class_id"] < len(class_names) else f"class_{gt_box['class_id']}",
-                "box": {
-                    "x_center": gt_box["x_center"],
-                    "y_center": gt_box["y_center"],
-                    "width": gt_box["width"],
-                    "height": gt_box["height"],
-                },
-                "best_iou": best_iou,
-                "reason": f"Possibly wrong label: no matching detection found (best IoU: {best_iou:.3f})",
-            })
 
     for gt_idx, gt_box in enumerate(ground_truth):
         if gt_idx not in matched_gt:

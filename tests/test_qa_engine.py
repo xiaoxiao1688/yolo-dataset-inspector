@@ -724,6 +724,205 @@ class TestBuildFinalLabelsLogic:
 
         assert len(final_boxes) == 0
 
+
+class TestClassConflictBoxIndex:
+    def test_class_conflict_should_include_box_index(self):
+        ground_truth = [
+            {
+                "class_id": 0,
+                "x_center": 0.5,
+                "y_center": 0.5,
+                "width": 0.2,
+                "height": 0.2,
+                "raw": "0 0.5 0.5 0.2 0.2",
+            }
+        ]
+        detections = [
+            {
+                "class_id": 1,
+                "x_center": 0.5,
+                "y_center": 0.5,
+                "width": 0.2,
+                "height": 0.2,
+                "confidence": 0.8,
+            }
+        ]
+        result = compare_labels(
+            ground_truth=ground_truth,
+            detections=detections,
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        conflict_issues = [i for i in result["issues"] if i["type"] == "class_conflict"]
+        assert len(conflict_issues) == 1
+        assert "box_index" in conflict_issues[0]["ground_truth"]
+        assert conflict_issues[0]["ground_truth"]["box_index"] == 0
+
+
+class TestUnmatchedGroundTruth:
+    def test_unmatched_ground_truth_should_be_reported(self):
+        ground_truth = [
+            {
+                "class_id": 0,
+                "x_center": 0.1,
+                "y_center": 0.1,
+                "width": 0.1,
+                "height": 0.1,
+                "raw": "0 0.1 0.1 0.1 0.1",
+            }
+        ]
+        detections = [
+            {
+                "class_id": 0,
+                "x_center": 0.9,
+                "y_center": 0.9,
+                "width": 0.1,
+                "height": 0.1,
+                "confidence": 0.8,
+            }
+        ]
+        result = compare_labels(
+            ground_truth=ground_truth,
+            detections=detections,
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        unmatched_issues = [i for i in result["issues"] if i["type"] == "unmatched_ground_truth"]
+        assert len(unmatched_issues) == 1
+        assert unmatched_issues[0]["box_index"] == 0
+
+    def test_no_duplicate_issues_for_unmatched_gt(self):
+        ground_truth = [
+            {
+                "class_id": 0,
+                "x_center": 0.1,
+                "y_center": 0.1,
+                "width": 0.1,
+                "height": 0.1,
+                "raw": "0 0.1 0.1 0.1 0.1",
+            }
+        ]
+        detections = [
+            {
+                "class_id": 0,
+                "x_center": 0.9,
+                "y_center": 0.9,
+                "width": 0.1,
+                "height": 0.1,
+                "confidence": 0.8,
+            }
+        ]
+        result = compare_labels(
+            ground_truth=ground_truth,
+            detections=detections,
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        possibly_wrong_issues = [i for i in result["issues"] if i["type"] == "possibly_wrong_label"]
+        unmatched_issues = [i for i in result["issues"] if i["type"] == "unmatched_ground_truth"]
+        assert len(possibly_wrong_issues) == 0
+        assert len(unmatched_issues) == 1
+
+
+class TestBoundaryDataHandling:
+    def test_empty_ground_truth_and_detections(self):
+        result = compare_labels(
+            ground_truth=[],
+            detections=[],
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        assert result["ground_truth_count"] == 0
+        assert result["detection_count"] == 0
+        assert result["matched_count"] == 0
+        assert len(result["issues"]) == 0
+
+    def test_empty_ground_truth_with_detections(self):
+        detections = [
+            {
+                "class_id": 0,
+                "x_center": 0.5,
+                "y_center": 0.5,
+                "width": 0.2,
+                "height": 0.2,
+                "confidence": 0.8,
+            }
+        ]
+        result = compare_labels(
+            ground_truth=[],
+            detections=detections,
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        missing_issues = [i for i in result["issues"] if i["type"] == "missing_label"]
+        assert len(missing_issues) == 1
+
+    def test_ground_truth_without_detections(self):
+        ground_truth = [
+            {
+                "class_id": 0,
+                "x_center": 0.5,
+                "y_center": 0.5,
+                "width": 0.2,
+                "height": 0.2,
+                "raw": "0 0.5 0.5 0.2 0.2",
+            }
+        ]
+        result = compare_labels(
+            ground_truth=ground_truth,
+            detections=[],
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        unmatched_issues = [i for i in result["issues"] if i["type"] == "unmatched_ground_truth"]
+        assert len(unmatched_issues) == 1
+
+    def test_parse_labels_with_invalid_lines(self):
+        content = """0 0.5 0.5 0.2 0.2
+invalid line
+1 0.3 0.3 0.1 0.1
+2 0.4 0.4 0.15 0.15"""
+        labels = parse_ground_truth_labels(content, class_count=3)
+        assert len(labels) == 2
+        assert labels[0]["class_id"] == 0
+        assert labels[1]["class_id"] == 1
+
+    def test_parse_labels_with_out_of_range_class(self):
+        content = "0 0.5 0.5 0.2 0.2\n5 0.3 0.3 0.1 0.1\n-1 0.4 0.4 0.1 0.1"
+        labels = parse_ground_truth_labels(content, class_count=3)
+        assert len(labels) == 1
+        assert labels[0]["class_id"] == 0
+
+    def test_parse_labels_with_invalid_coordinates(self):
+        content = "0 -0.1 0.5 0.2 0.2\n0 1.1 0.3 0.1 0.1\n0 0.5 0.5 1.2 0.2\n0 0.5 0.5 0.2 -0.1"
+        labels = parse_ground_truth_labels(content, class_count=3)
+        assert len(labels) == 0
+
+    def test_anomalous_box_detection(self):
+        normal_box = [0.5, 0.5, 0.2, 0.2]
+        assert not is_anomalous_box(normal_box, 640, 480)
+
+        too_small_box = [0.5, 0.5, 0.00001, 0.00001]
+        assert is_anomalous_box(too_small_box, 640, 480)
+
+        too_large_box = [0.5, 0.5, 0.95, 0.95]
+        assert is_anomalous_box(too_large_box, 640, 480)
+
+        extreme_aspect_ratio = [0.5, 0.5, 0.5, 0.01]
+        assert is_anomalous_box(extreme_aspect_ratio, 640, 480)
+
+        zero_dimension_box = [0.5, 0.5, 0, 0.2]
+        assert is_anomalous_box(zero_dimension_box, 640, 480)
+
+        negative_dimension_box = [0.5, 0.5, -0.1, 0.2]
+        assert is_anomalous_box(negative_dimension_box, 640, 480)
+
     def test_missing_label_accept_should_add(self):
         session_data = {
             "results": [
@@ -1026,3 +1225,202 @@ class TestBuildFinalLabelsLogic:
                     })
 
         assert len(final_boxes) == 0
+
+
+class TestClassConflictBoxIndex:
+    def test_class_conflict_should_include_box_index(self):
+        ground_truth = [
+            {
+                "class_id": 0,
+                "x_center": 0.5,
+                "y_center": 0.5,
+                "width": 0.2,
+                "height": 0.2,
+                "raw": "0 0.5 0.5 0.2 0.2",
+            }
+        ]
+        detections = [
+            {
+                "class_id": 1,
+                "x_center": 0.5,
+                "y_center": 0.5,
+                "width": 0.2,
+                "height": 0.2,
+                "confidence": 0.8,
+            }
+        ]
+        result = compare_labels(
+            ground_truth=ground_truth,
+            detections=detections,
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        conflict_issues = [i for i in result["issues"] if i["type"] == "class_conflict"]
+        assert len(conflict_issues) == 1
+        assert "box_index" in conflict_issues[0]["ground_truth"]
+        assert conflict_issues[0]["ground_truth"]["box_index"] == 0
+
+
+class TestUnmatchedGroundTruth:
+    def test_unmatched_ground_truth_should_be_reported(self):
+        ground_truth = [
+            {
+                "class_id": 0,
+                "x_center": 0.1,
+                "y_center": 0.1,
+                "width": 0.1,
+                "height": 0.1,
+                "raw": "0 0.1 0.1 0.1 0.1",
+            }
+        ]
+        detections = [
+            {
+                "class_id": 0,
+                "x_center": 0.9,
+                "y_center": 0.9,
+                "width": 0.1,
+                "height": 0.1,
+                "confidence": 0.8,
+            }
+        ]
+        result = compare_labels(
+            ground_truth=ground_truth,
+            detections=detections,
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        unmatched_issues = [i for i in result["issues"] if i["type"] == "unmatched_ground_truth"]
+        assert len(unmatched_issues) == 1
+        assert unmatched_issues[0]["box_index"] == 0
+
+    def test_no_duplicate_issues_for_unmatched_gt(self):
+        ground_truth = [
+            {
+                "class_id": 0,
+                "x_center": 0.1,
+                "y_center": 0.1,
+                "width": 0.1,
+                "height": 0.1,
+                "raw": "0 0.1 0.1 0.1 0.1",
+            }
+        ]
+        detections = [
+            {
+                "class_id": 0,
+                "x_center": 0.9,
+                "y_center": 0.9,
+                "width": 0.1,
+                "height": 0.1,
+                "confidence": 0.8,
+            }
+        ]
+        result = compare_labels(
+            ground_truth=ground_truth,
+            detections=detections,
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        possibly_wrong_issues = [i for i in result["issues"] if i["type"] == "possibly_wrong_label"]
+        unmatched_issues = [i for i in result["issues"] if i["type"] == "unmatched_ground_truth"]
+        assert len(possibly_wrong_issues) == 0
+        assert len(unmatched_issues) == 1
+
+
+class TestBoundaryDataHandling:
+    def test_empty_ground_truth_and_detections(self):
+        result = compare_labels(
+            ground_truth=[],
+            detections=[],
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        assert result["ground_truth_count"] == 0
+        assert result["detection_count"] == 0
+        assert result["matched_count"] == 0
+        assert len(result["issues"]) == 0
+
+    def test_empty_ground_truth_with_detections(self):
+        detections = [
+            {
+                "class_id": 0,
+                "x_center": 0.5,
+                "y_center": 0.5,
+                "width": 0.2,
+                "height": 0.2,
+                "confidence": 0.8,
+            }
+        ]
+        result = compare_labels(
+            ground_truth=[],
+            detections=detections,
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        missing_issues = [i for i in result["issues"] if i["type"] == "missing_label"]
+        assert len(missing_issues) == 1
+
+    def test_ground_truth_without_detections(self):
+        ground_truth = [
+            {
+                "class_id": 0,
+                "x_center": 0.5,
+                "y_center": 0.5,
+                "width": 0.2,
+                "height": 0.2,
+                "raw": "0 0.5 0.5 0.2 0.2",
+            }
+        ]
+        result = compare_labels(
+            ground_truth=ground_truth,
+            detections=[],
+            img_width=640,
+            img_height=480,
+            class_names=["person", "car"],
+        )
+        unmatched_issues = [i for i in result["issues"] if i["type"] == "unmatched_ground_truth"]
+        assert len(unmatched_issues) == 1
+
+    def test_parse_labels_with_invalid_lines(self):
+        content = """0 0.5 0.5 0.2 0.2
+invalid line
+1 0.3 0.3 0.1 0.1
+2 0.4 0.4 0.15 0.15"""
+        labels = parse_ground_truth_labels(content, class_count=3)
+        assert len(labels) == 2
+        assert labels[0]["class_id"] == 0
+        assert labels[1]["class_id"] == 1
+
+    def test_parse_labels_with_out_of_range_class(self):
+        content = "0 0.5 0.5 0.2 0.2\n5 0.3 0.3 0.1 0.1\n-1 0.4 0.4 0.1 0.1"
+        labels = parse_ground_truth_labels(content, class_count=3)
+        assert len(labels) == 1
+        assert labels[0]["class_id"] == 0
+
+    def test_parse_labels_with_invalid_coordinates(self):
+        content = "0 -0.1 0.5 0.2 0.2\n0 1.1 0.3 0.1 0.1\n0 0.5 0.5 1.2 0.2\n0 0.5 0.5 0.2 -0.1"
+        labels = parse_ground_truth_labels(content, class_count=3)
+        assert len(labels) == 0
+
+    def test_anomalous_box_detection(self):
+        normal_box = [0.5, 0.5, 0.2, 0.2]
+        assert not is_anomalous_box(normal_box, 640, 480)
+
+        too_small_box = [0.5, 0.5, 0.00001, 0.00001]
+        assert is_anomalous_box(too_small_box, 640, 480)
+
+        too_large_box = [0.5, 0.5, 0.95, 0.95]
+        assert is_anomalous_box(too_large_box, 640, 480)
+
+        extreme_aspect_ratio = [0.5, 0.5, 0.5, 0.01]
+        assert is_anomalous_box(extreme_aspect_ratio, 640, 480)
+
+        zero_dimension_box = [0.5, 0.5, 0, 0.2]
+        assert is_anomalous_box(zero_dimension_box, 640, 480)
+
+        negative_dimension_box = [0.5, 0.5, -0.1, 0.2]
+        assert is_anomalous_box(negative_dimension_box, 640, 480)
