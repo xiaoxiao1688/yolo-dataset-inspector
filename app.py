@@ -18,6 +18,51 @@ SESSION_DATA_DIR.mkdir(parents=True, exist_ok=True)
 qa_session_store = {}
 
 
+def get_review_progress(session: dict) -> dict:
+    progress = {
+        "total": 0,
+        "decided": 0,
+        "undecided": 0,
+        "by_type": {},
+        "by_image": {},
+    }
+
+    for result in session.get("results", []):
+        issues = result.get("comparison", {}).get("issues", [])
+        decisions = result.get("decisions", [])
+        decided_indices = set(d.get("issue_index") for d in decisions)
+
+        image_key = result.get("image_key")
+        progress["by_image"][image_key] = {
+            "total": len(issues),
+            "decided": 0,
+            "undecided": 0,
+        }
+
+        for idx, issue in enumerate(issues):
+            progress["total"] += 1
+            issue_type = issue.get("type")
+
+            if issue_type not in progress["by_type"]:
+                progress["by_type"][issue_type] = {"total": 0, "decided": 0, "undecided": 0}
+            progress["by_type"][issue_type]["total"] += 1
+
+            if idx in decided_indices:
+                progress["decided"] += 1
+                progress["by_type"][issue_type]["decided"] += 1
+                progress["by_image"][image_key]["decided"] += 1
+            else:
+                progress["undecided"] += 1
+                progress["by_type"][issue_type]["undecided"] += 1
+                progress["by_image"][image_key]["undecided"] += 1
+
+    progress["percentage"] = (
+        round((progress["decided"] / progress["total"]) * 100) if progress["total"] > 0 else 100
+    )
+    progress["is_complete"] = progress["undecided"] == 0
+    return progress
+
+
 def get_session_dir(session_id: str) -> Path:
     return SESSION_DATA_DIR / session_id
 
@@ -219,6 +264,129 @@ def qa_set_decision():
     return jsonify({"status": "ok", "message": f"Decision '{decision}' recorded"})
 
 
+@app.post("/api/qa/decision/batch")
+def qa_set_decision_batch():
+    session_id = request.json.get("session_id")
+    image_key = request.json.get("image_key")
+    issue_type = request.json.get("issue_type")
+    decision = request.json.get("decision")
+    issue_indices = request.json.get("issue_indices")
+
+    if session_id not in qa_session_store:
+        return jsonify({"error": "Session not found"}), 404
+
+    session = qa_session_store[session_id]
+    result = None
+    for r in session["results"]:
+        if r["image_key"] == image_key:
+            result = r
+            break
+
+    if not result:
+        return jsonify({"error": "Image not found in session"}), 404
+
+    if decision not in ["accept", "reject", "keep"]:
+        return jsonify({"error": "Invalid decision. Use 'accept', 'reject', or 'keep'"}), 400
+
+    issues = result.get("comparison", {}).get("issues", [])
+    decisions = result.get("decisions", [])
+    decided_indices = set(d.get("issue_index") for d in decisions)
+
+    target_indices = []
+    if issue_indices is not None:
+        target_indices = [
+            idx for idx in issue_indices
+            if 0 <= idx < len(issues) and idx not in decided_indices
+        ]
+    elif issue_type is not None:
+        target_indices = [
+            idx for idx, issue in enumerate(issues)
+            if issue.get("type") == issue_type and idx not in decided_indices
+        ]
+    else:
+        return jsonify({"error": "Must provide either issue_type or issue_indices"}), 400
+
+    if not target_indices:
+        return jsonify({
+            "status": "ok",
+            "processed_count": 0,
+            "total_count": 0,
+            "message": "No undecided issues found"
+        })
+
+    processed_count = 0
+    for issue_index in target_indices:
+        if issue_index < 0 or issue_index >= len(issues):
+            continue
+
+        existing_idx = None
+        for i, d in enumerate(decisions):
+            if d["issue_index"] == issue_index:
+                existing_idx = i
+                break
+
+        new_decision = {
+            "issue_index": issue_index,
+            "decision": decision,
+            "issue": issues[issue_index],
+        }
+
+        if existing_idx is not None:
+            decisions[existing_idx] = new_decision
+        else:
+            decisions.append(new_decision)
+        processed_count += 1
+
+    result["decisions"] = decisions
+    save_session_to_disk(session_id, session)
+
+    progress = get_review_progress(session)
+
+    return jsonify({
+        "status": "ok",
+        "processed_count": processed_count,
+        "total_count": len(target_indices),
+        "message": f"Processed {processed_count} decisions",
+        "progress": progress
+    })
+
+
+@app.get("/api/qa/progress/<session_id>")
+def qa_get_progress(session_id):
+    if session_id not in qa_session_store:
+        return jsonify({"error": "Session not found"}), 404
+
+    session = qa_session_store[session_id]
+    progress = get_review_progress(session)
+
+    config = session.get("config", {})
+    progress["strict_export"] = config.get("strict_export", False)
+
+    return jsonify(progress)
+
+
+@app.post("/api/qa/config/<session_id>")
+def qa_set_config(session_id):
+    if session_id not in qa_session_store:
+        return jsonify({"error": "Session not found"}), 404
+
+    session = qa_session_store[session_id]
+
+    if "config" not in session:
+        session["config"] = {}
+
+    strict_export = request.json.get("strict_export")
+    if strict_export is not None:
+        session["config"]["strict_export"] = bool(strict_export)
+
+    save_session_to_disk(session_id, session)
+
+    return jsonify({
+        "status": "ok",
+        "config": session["config"]
+    })
+
+
 @app.get("/api/qa/image/<session_id>/<filename>")
 def qa_get_image(session_id, filename):
     session_dir = get_session_dir(session_id)
@@ -341,6 +509,18 @@ def qa_export_labels(session_id):
         return jsonify({"error": "Session not found"}), 404
 
     session = qa_session_store[session_id]
+    config = session.get("config", {})
+    strict_export = config.get("strict_export", False)
+
+    progress = get_review_progress(session)
+
+    if strict_export and not progress["is_complete"]:
+        return jsonify({
+            "error": "Export blocked: pending decisions exist",
+            "message": f"{progress['undecided']} issues are still pending decision. Complete all reviews or disable strict export mode.",
+            "progress": progress
+        }), 400
+
     all_labels = build_final_labels(session)
 
     import zipfile
@@ -369,25 +549,76 @@ def qa_export_audit(session_id):
         return jsonify({"error": "Session not found"}), 404
 
     session = qa_session_store[session_id]
+    progress = get_review_progress(session)
+    config = session.get("config", {})
+
+    decisions_by_type = {}
+    decisions_by_action = {"accept": 0, "reject": 0, "keep": 0}
+
+    for result in session["results"]:
+        for decision in result.get("decisions", []):
+            action = decision.get("decision", "")
+            if action in decisions_by_action:
+                decisions_by_action[action] += 1
+
+            issue = decision.get("issue", {})
+            issue_type = issue.get("type", "unknown")
+            if issue_type not in decisions_by_type:
+                decisions_by_type[issue_type] = {"accept": 0, "reject": 0, "keep": 0}
+            if action in decisions_by_type[issue_type]:
+                decisions_by_type[issue_type][action] += 1
+
+    final_labels = build_final_labels(session)
+    total_exported_boxes = sum(len(ld["boxes"]) for ld in final_labels.values())
 
     audit_report = {
         "session_id": session_id,
+        "config": {
+            "strict_export": config.get("strict_export", False),
+        },
+        "progress": progress,
         "summary": {
             "total_images": len(session["results"]),
             "total_ground_truth": sum(r["comparison"]["ground_truth_count"] for r in session["results"]),
             "total_detections": sum(r["comparison"]["detection_count"] for r in session["results"]),
             "total_issues": sum(len(r["comparison"]["issues"]) for r in session["results"]),
             "total_decisions": sum(len(r["decisions"]) for r in session["results"]),
+            "decisions_by_action": decisions_by_action,
+            "decisions_by_type": decisions_by_type,
+            "total_exported_boxes": total_exported_boxes,
         },
         "images": [],
     }
 
     for result in session["results"]:
+        image_decisions_by_type = {}
+        image_decisions_by_action = {"accept": 0, "reject": 0, "keep": 0}
+
+        for decision in result.get("decisions", []):
+            action = decision.get("decision", "")
+            if action in image_decisions_by_action:
+                image_decisions_by_action[action] += 1
+
+            issue = decision.get("issue", {})
+            issue_type = issue.get("type", "unknown")
+            if issue_type not in image_decisions_by_type:
+                image_decisions_by_type[issue_type] = {"accept": 0, "reject": 0, "keep": 0}
+            if action in image_decisions_by_type[issue_type]:
+                image_decisions_by_type[issue_type][action] += 1
+
+        image_key = result["image_key"]
+        image_exported_boxes = len(final_labels.get(image_key, {}).get("boxes", []))
+
         image_report = {
-            "image_key": result["image_key"],
+            "image_key": image_key,
             "image_info": result["image_info"],
             "ground_truth_count": result["comparison"]["ground_truth_count"],
             "detection_count": result["comparison"]["detection_count"],
+            "issue_count": len(result["comparison"]["issues"]),
+            "decision_count": len(result["decisions"]),
+            "decisions_by_action": image_decisions_by_action,
+            "decisions_by_type": image_decisions_by_type,
+            "exported_boxes_count": image_exported_boxes,
             "issues": result["comparison"]["issues"],
             "decisions": result["decisions"],
         }

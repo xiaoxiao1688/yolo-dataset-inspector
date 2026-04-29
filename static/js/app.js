@@ -6,6 +6,7 @@ const elements = {
   decisionPanel: document.querySelector("#decision-panel"),
   exportAuditButton: document.querySelector("#export-audit-button"),
   exportLabelsButton: document.querySelector("#export-labels-button"),
+  strictExportCheckbox: document.querySelector("#strict-export-checkbox"),
   heroHealth: document.querySelector("#hero-health"),
   imageHint: document.querySelector("#image-hint"),
   imageInput: document.querySelector("#image-input"),
@@ -35,6 +36,7 @@ const state = {
   selectedIssueIndex: null,
   canvasImage: null,
   canvasScale: 1,
+  strictExport: false,
 };
 
 const BOX_COLORS = {
@@ -177,9 +179,14 @@ async function restoreSessionFromStorage() {
     state.selectedResult = null;
     state.selectedIssueIndex = null;
 
+    const config = sessionData.config || {};
+    state.strictExport = config.strict_export || false;
+
     elements.sessionId.textContent = state.sessionId;
     elements.exportLabelsButton.disabled = false;
     elements.exportAuditButton.disabled = false;
+    elements.strictExportCheckbox.disabled = false;
+    elements.strictExportCheckbox.checked = state.strictExport;
 
     updateMetrics();
     renderImageList();
@@ -726,58 +733,45 @@ async function submitBatchDecision(issueType, decision) {
   try {
     setStatus(`Processing ${targetIndices.length} decisions...`);
 
-    let successCount = 0;
-    for (const issueIndex of targetIndices) {
-      const response = await fetch("/api/qa/decision", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          session_id: state.sessionId,
-          image_key: state.selectedImageKey,
-          issue_index: issueIndex,
-          decision: decision,
-        }),
-      });
-
-      const payload = await response.json();
-      if (!response.ok) {
-        console.warn(`Failed to submit decision for issue ${issueIndex}:`, payload.error);
-        continue;
-      }
-
-      if (!result.decisions) {
-        result.decisions = [];
-      }
-
-      let existingIndex = -1;
-      for (let i = 0; i < result.decisions.length; i++) {
-        if (result.decisions[i].issue_index === issueIndex) {
-          existingIndex = i;
-          break;
-        }
-      }
-
-      const newDecision = {
-        issue_index: issueIndex,
+    const response = await fetch("/api/qa/decision/batch", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        session_id: state.sessionId,
+        image_key: state.selectedImageKey,
+        issue_type: issueType,
         decision: decision,
-        issue: result.comparison.issues[issueIndex],
-      };
+      }),
+    });
 
-      if (existingIndex >= 0) {
-        result.decisions[existingIndex] = newDecision;
-      } else {
-        result.decisions.push(newDecision);
-      }
-
-      successCount++;
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to submit batch decisions");
     }
 
-    if (successCount === targetIndices.length) {
-      setStatus(`Successfully processed ${successCount} decisions.`);
+    if (result.decisions) {
+      result.decisions = [];
+    }
+
+    const freshResponse = await fetch(`/api/qa/session/${state.sessionId}`);
+    if (freshResponse.ok) {
+      const freshData = await freshResponse.json();
+      state.results = freshData.results || [];
+      const updatedResult = state.results.find((r) => r.image_key === state.selectedImageKey);
+      if (updatedResult) {
+        state.selectedResult = updatedResult;
+      }
+    }
+
+    const processedCount = payload.processed_count || 0;
+    const totalCount = payload.total_count || targetIndices.length;
+
+    if (processedCount === totalCount) {
+      setStatus(`Successfully processed ${processedCount} decisions.`);
     } else {
-      setStatus(`Processed ${successCount}/${targetIndices.length} decisions. Some failed.`, "warn");
+      setStatus(`Processed ${processedCount}/${totalCount} decisions.`, "warn");
     }
 
     renderIssueDetails();
@@ -785,6 +779,43 @@ async function submitBatchDecision(issueType, decision) {
     renderDecisionSummary();
   } catch (error) {
     setStatus(error.message || "Failed to submit batch decisions.", "error");
+  }
+}
+
+async function setStrictExport(enabled) {
+  if (!state.sessionId) {
+    setStatus("No active session.", "error");
+    return;
+  }
+
+  try {
+    const response = await fetch(`/api/qa/config/${state.sessionId}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        strict_export: enabled,
+      }),
+    });
+
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Failed to set strict export mode");
+    }
+
+    if (state.sessionId) {
+      const progressResponse = await fetch(`/api/qa/progress/${state.sessionId}`);
+      if (progressResponse.ok) {
+        const progressData = await progressResponse.json();
+        state.strictExport = progressData.strict_export || false;
+      }
+    }
+
+    const modeText = enabled ? "enabled" : "disabled";
+    setStatus(`Strict export mode ${modeText}.`);
+  } catch (error) {
+    setStatus(error.message || "Failed to set strict export mode.", "error");
   }
 }
 
@@ -946,10 +977,13 @@ async function runQA() {
     state.selectedImageKey = null;
     state.selectedResult = null;
     state.selectedIssueIndex = null;
+    state.strictExport = false;
 
     elements.sessionId.textContent = state.sessionId;
     elements.exportLabelsButton.disabled = false;
     elements.exportAuditButton.disabled = false;
+    elements.strictExportCheckbox.disabled = false;
+    elements.strictExportCheckbox.checked = false;
 
     saveSessionToStorage();
 
@@ -992,26 +1026,37 @@ elements.runQaButton.addEventListener("click", async () => {
   }
 });
 
-elements.exportLabelsButton.addEventListener("click", () => {
+elements.strictExportCheckbox.addEventListener("change", async () => {
+  const enabled = elements.strictExportCheckbox.checked;
+  await setStrictExport(enabled);
+});
+
+elements.exportLabelsButton.addEventListener("click", async () => {
   if (!state.sessionId) {
     return;
   }
 
-  const progress = getReviewProgress();
-  if (progress.undecided > 0) {
-    const confirmed = confirm(
-      `Warning: ${progress.undecided} issues are still pending decision.\n\n` +
-      `Exported labels will use original/unchanged values for undecided issues.\n\n` +
-      `Do you want to continue?`
-    );
-    if (!confirmed) {
-      setStatus(`Export canceled. ${progress.undecided} issues pending.`, "warn");
-      return;
-    }
-  }
+  try {
+    const response = await fetch(`/api/qa/export/labels/${state.sessionId}`);
 
-  window.open(`/api/qa/export/labels/${state.sessionId}`, "_blank");
-  setStatus("Exporting labels...");
+    if (!response.ok) {
+      const payload = await response.json();
+      if (response.status === 400 && payload.error === "Export blocked: pending decisions exist") {
+        const progress = payload.progress || {};
+        setStatus(
+          `Export blocked: ${progress.undecided || "unknown"} issues pending. Complete all reviews or disable Strict Export.`,
+          "error"
+        );
+        return;
+      }
+      throw new Error(payload.error || "Export failed");
+    }
+
+    window.open(`/api/qa/export/labels/${state.sessionId}`, "_blank");
+    setStatus("Exporting labels...");
+  } catch (error) {
+    setStatus(error.message || "Export failed.", "error");
+  }
 });
 
 elements.exportAuditButton.addEventListener("click", () => {
