@@ -88,6 +88,61 @@ function getIssueTypeClass(type) {
   return classes[type] || "issue-default";
 }
 
+function getDecisionForIssueType(issueType, action) {
+  if (issueType === "missing_label") {
+    return action === "accept" ? "accept" : "reject";
+  } else if (issueType === "class_conflict") {
+    return action === "accept" ? "accept" : "keep";
+  } else {
+    return action === "accept" ? "keep" : "reject";
+  }
+}
+
+function getReviewProgress() {
+  const progress = {
+    total: 0,
+    decided: 0,
+    undecided: 0,
+    byType: {},
+    byImage: {},
+  };
+
+  state.results.forEach((result) => {
+    const issues = result.comparison.issues || [];
+    const decisions = result.decisions || [];
+    const decidedIndices = new Set(decisions.map((d) => d.issue_index));
+
+    progress.byImage[result.image_key] = {
+      total: issues.length,
+      decided: 0,
+      undecided: 0,
+    };
+
+    issues.forEach((issue, idx) => {
+      progress.total++;
+      const issueType = issue.type;
+
+      if (!progress.byType[issueType]) {
+        progress.byType[issueType] = { total: 0, decided: 0, undecided: 0 };
+      }
+      progress.byType[issueType].total++;
+
+      if (decidedIndices.has(idx)) {
+        progress.decided++;
+        progress.byType[issueType].decided++;
+        progress.byImage[result.image_key].decided++;
+      } else {
+        progress.undecided++;
+        progress.byType[issueType].undecided++;
+        progress.byImage[result.image_key].undecided++;
+      }
+    });
+  });
+
+  progress.percentage = progress.total > 0 ? Math.round((progress.decided / progress.total) * 100) : 100;
+  return progress;
+}
+
 const STORAGE_KEY = "geodraft_qa_session";
 
 function saveSessionToStorage() {
@@ -383,14 +438,73 @@ function renderIssueDetails() {
   const decisions = result.decisions || [];
   const decidedIndices = new Set(decisions.map((d) => d.issue_index));
 
-  elements.issueDetailHint.textContent = `${issues.length} issues found. ${decisions.length} decisions made.`;
+  const undecidedCount = issues.length - decisions.length;
+  elements.issueDetailHint.textContent = `${issues.length} issues found. ${decisions.length} decided, ${undecidedCount} pending.`;
 
   if (!issues.length) {
     elements.issueDetailPanel.innerHTML = '<div class="empty-state">No issues found for this image.</div>';
     return;
   }
 
-  elements.issueDetailPanel.innerHTML = issues
+  const issueTypeStats = {};
+  issues.forEach((issue, idx) => {
+    const type = issue.type;
+    if (!issueTypeStats[type]) {
+      issueTypeStats[type] = { total: 0, undecided: 0 };
+    }
+    issueTypeStats[type].total++;
+    if (!decidedIndices.has(idx)) {
+      issueTypeStats[type].undecided++;
+    }
+  });
+
+  let batchActionsHtml = "";
+  if (undecidedCount > 0) {
+    const typeButtons = Object.entries(issueTypeStats)
+      .filter(([_, stats]) => stats.undecided > 0)
+      .map(([type, stats]) => {
+        const typeLabel = getIssueTypeLabel(type);
+        const acceptDecision = getDecisionForIssueType(type, "accept");
+        const rejectDecision = getDecisionForIssueType(type, "reject");
+
+        let acceptLabel = "Accept";
+        let rejectLabel = "Reject";
+        if (type === "missing_label") {
+          acceptLabel = "Accept All";
+          rejectLabel = "Reject All";
+        } else if (type === "class_conflict") {
+          acceptLabel = "Use Model";
+          rejectLabel = "Keep Original";
+        } else {
+          acceptLabel = "Keep All";
+          rejectLabel = "Remove All";
+        }
+
+        return `
+          <div class="batch-type-group" data-type="${type}">
+            <span class="batch-type-label">${typeLabel} (${stats.undecided}/${stats.total})</span>
+            <div class="batch-type-buttons">
+              <button class="batch-accept" data-type="${type}" data-decision="${acceptDecision}">${acceptLabel}</button>
+              <button class="batch-reject" data-type="${type}" data-decision="${rejectDecision}">${rejectLabel}</button>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+
+    if (typeButtons) {
+      batchActionsHtml = `
+        <div class="batch-actions-panel">
+          <p class="batch-actions-title">Batch Actions (Undecided: ${undecidedCount})</p>
+          <div class="batch-actions-content">
+            ${typeButtons}
+          </div>
+        </div>
+      `;
+    }
+  }
+
+  const issuesHtml = issues
     .map((issue, index) => {
       const isDecided = decidedIndices.has(index);
       const isHighlighted = state.selectedIssueIndex === index;
@@ -477,7 +591,7 @@ function renderIssueDetails() {
       }
 
       return `
-        <div class="issue-card ${getIssueTypeClass(issue.type)} ${isDecided ? "decided" : ""} ${isHighlighted ? "highlighted" : ""}" data-issue-index="${index}">
+        <div class="issue-card ${getIssueTypeClass(issue.type)} ${isDecided ? "decided" : ""} ${isHighlighted ? "highlighted" : ""}" data-issue-index="${index}" data-issue-type="${issue.type}">
           <div class="issue-header">
             <span class="issue-type-badge">${getIssueTypeLabel(issue.type)}</span>
             <span class="issue-index">#${index + 1}</span>
@@ -489,6 +603,8 @@ function renderIssueDetails() {
       `;
     })
     .join("");
+
+  elements.issueDetailPanel.innerHTML = batchActionsHtml + '<div class="issues-list-container">' + issuesHtml + "</div>";
 
   document.querySelectorAll("#issue-detail-panel .issue-card").forEach((card) => {
     card.addEventListener("click", (event) => {
@@ -506,6 +622,15 @@ function renderIssueDetails() {
       const index = parseInt(button.dataset.index, 10);
       const decision = button.dataset.decision;
       await submitDecision(index, decision);
+    });
+  });
+
+  document.querySelectorAll("#issue-detail-panel .batch-accept, #issue-detail-panel .batch-reject").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const issueType = button.dataset.type;
+      const decision = button.dataset.decision;
+      await submitBatchDecision(issueType, decision);
     });
   });
 }
@@ -573,6 +698,96 @@ async function submitDecision(issueIndex, decision) {
   }
 }
 
+async function submitBatchDecision(issueType, decision) {
+  if (!state.sessionId || !state.selectedImageKey) {
+    setStatus("No active session.", "error");
+    return;
+  }
+
+  const result = state.selectedResult;
+  if (!result) {
+    return;
+  }
+
+  const issues = result.comparison.issues;
+  const decisions = result.decisions || [];
+  const decidedIndices = new Set(decisions.map((d) => d.issue_index));
+
+  const targetIndices = issues
+    .map((issue, idx) => ({ issue, idx }))
+    .filter(({ issue, idx }) => issue.type === issueType && !decidedIndices.has(idx))
+    .map(({ idx }) => idx);
+
+  if (targetIndices.length === 0) {
+    setStatus("No undecided issues of this type.", "warn");
+    return;
+  }
+
+  try {
+    setStatus(`Processing ${targetIndices.length} decisions...`);
+
+    let successCount = 0;
+    for (const issueIndex of targetIndices) {
+      const response = await fetch("/api/qa/decision", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          session_id: state.sessionId,
+          image_key: state.selectedImageKey,
+          issue_index: issueIndex,
+          decision: decision,
+        }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        console.warn(`Failed to submit decision for issue ${issueIndex}:`, payload.error);
+        continue;
+      }
+
+      if (!result.decisions) {
+        result.decisions = [];
+      }
+
+      let existingIndex = -1;
+      for (let i = 0; i < result.decisions.length; i++) {
+        if (result.decisions[i].issue_index === issueIndex) {
+          existingIndex = i;
+          break;
+        }
+      }
+
+      const newDecision = {
+        issue_index: issueIndex,
+        decision: decision,
+        issue: result.comparison.issues[issueIndex],
+      };
+
+      if (existingIndex >= 0) {
+        result.decisions[existingIndex] = newDecision;
+      } else {
+        result.decisions.push(newDecision);
+      }
+
+      successCount++;
+    }
+
+    if (successCount === targetIndices.length) {
+      setStatus(`Successfully processed ${successCount} decisions.`);
+    } else {
+      setStatus(`Processed ${successCount}/${targetIndices.length} decisions. Some failed.`, "warn");
+    }
+
+    renderIssueDetails();
+    renderImageList();
+    renderDecisionSummary();
+  } catch (error) {
+    setStatus(error.message || "Failed to submit batch decisions.", "error");
+  }
+}
+
 function renderDecisionSummary() {
   const allDecisions = [];
   state.results.forEach((result) => {
@@ -585,13 +800,18 @@ function renderDecisionSummary() {
     });
   });
 
-  if (!allDecisions.length) {
-    elements.decisionPanel.innerHTML = '<div class="empty-state">Accept or reject suggestions to populate this panel.</div>';
-    elements.decisionHint.textContent = "No decisions made yet.";
+  const progress = getReviewProgress();
+
+  if (progress.total === 0) {
+    elements.decisionPanel.innerHTML = '<div class="empty-state">No issues to review. All labels look good!</div>';
+    elements.decisionHint.textContent = "No issues found.";
     return;
   }
 
-  elements.decisionHint.textContent = `${allDecisions.length} decisions made.`;
+  const progressPercent = progress.percentage;
+  const isComplete = progressPercent === 100;
+
+  elements.decisionHint.textContent = `Review Progress: ${progressPercent}% (${progress.decided}/${progress.total} decided, ${progress.undecided} pending)`;
 
   const grouped = {
     accept: allDecisions.filter((d) => d.decision === "accept"),
@@ -599,7 +819,82 @@ function renderDecisionSummary() {
     keep: allDecisions.filter((d) => d.decision === "keep"),
   };
 
+  let byTypeStatsHtml = "";
+  if (Object.keys(progress.byType).length > 0) {
+    byTypeStatsHtml = Object.entries(progress.byType)
+      .map(([type, stats]) => {
+        const typeLabel = getIssueTypeLabel(type);
+        const typePercent = stats.total > 0 ? Math.round((stats.decided / stats.total) * 100) : 100;
+        return `
+          <div class="type-progress-item">
+            <span class="type-progress-label">${typeLabel}: ${stats.decided}/${stats.total}</span>
+            <div class="type-progress-bar">
+              <div class="type-progress-fill" style="width: ${typePercent}%"></div>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+  }
+
+  let completenessHtml = "";
+  if (!isComplete) {
+    completenessHtml = `
+      <div class="incomplete-warning">
+        <strong>⚠️ ${progress.undecided} issues pending decision.</strong>
+        <p>Exported labels will use original/unchanged values for undecided issues.</p>
+      </div>
+    `;
+  } else {
+    completenessHtml = `
+      <div class="complete-badge">
+        <strong>✓ All issues reviewed!</strong>
+        <p>Ready to export.</p>
+      </div>
+    `;
+  }
+
+  let decisionsListHtml = "";
+  if (allDecisions.length > 0) {
+    decisionsListHtml = `
+      <div class="decision-list">
+        ${allDecisions
+          .map((d) => {
+            const decisionClass = {
+              accept: "decision-accepted",
+              reject: "decision-rejected",
+              keep: "decision-kept",
+            }[d.decision] || "";
+            const decisionLabel = {
+              accept: "Accepted",
+              reject: "Rejected",
+              keep: "Kept",
+            }[d.decision] || d.decision;
+
+            return `
+              <div class="decision-item ${decisionClass}">
+                <p class="decision-filename">${d.filename}</p>
+                <p class="decision-type">${getIssueTypeLabel(d.issue.type)}</p>
+                <p class="decision-label">${decisionLabel}</p>
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+    `;
+  }
+
   elements.decisionPanel.innerHTML = `
+    <div class="progress-overview">
+      <div class="progress-bar-container">
+        <div class="progress-bar">
+          <div class="progress-fill ${isComplete ? "complete" : ""}" style="width: ${progressPercent}%"></div>
+        </div>
+        <span class="progress-text">${progressPercent}%</span>
+      </div>
+      ${byTypeStatsHtml}
+    </div>
+    ${completenessHtml}
     <div class="decision-stats">
       <div class="stat-item stat-accept">
         <span class="stat-label">Accepted</span>
@@ -614,30 +909,7 @@ function renderDecisionSummary() {
         <span class="stat-value">${grouped.keep.length}</span>
       </div>
     </div>
-    <div class="decision-list">
-      ${allDecisions
-        .map((d) => {
-          const decisionClass = {
-            accept: "decision-accepted",
-            reject: "decision-rejected",
-            keep: "decision-kept",
-          }[d.decision] || "";
-          const decisionLabel = {
-            accept: "Accepted",
-            reject: "Rejected",
-            keep: "Kept",
-          }[d.decision] || d.decision;
-
-          return `
-            <div class="decision-item ${decisionClass}">
-              <p class="decision-filename">${d.filename}</p>
-              <p class="decision-type">${getIssueTypeLabel(d.issue.type)}</p>
-              <p class="decision-label">${decisionLabel}</p>
-            </div>
-          `;
-        })
-        .join("")}
-    </div>
+    ${decisionsListHtml}
   `;
 }
 
@@ -724,6 +996,20 @@ elements.exportLabelsButton.addEventListener("click", () => {
   if (!state.sessionId) {
     return;
   }
+
+  const progress = getReviewProgress();
+  if (progress.undecided > 0) {
+    const confirmed = confirm(
+      `Warning: ${progress.undecided} issues are still pending decision.\n\n` +
+      `Exported labels will use original/unchanged values for undecided issues.\n\n` +
+      `Do you want to continue?`
+    );
+    if (!confirmed) {
+      setStatus(`Export canceled. ${progress.undecided} issues pending.`, "warn");
+      return;
+    }
+  }
+
   window.open(`/api/qa/export/labels/${state.sessionId}`, "_blank");
   setStatus("Exporting labels...");
 });
@@ -732,6 +1018,12 @@ elements.exportAuditButton.addEventListener("click", () => {
   if (!state.sessionId) {
     return;
   }
+
+  const progress = getReviewProgress();
+  if (progress.undecided > 0) {
+    setStatus(`Audit export: ${progress.undecided} issues pending decision.`, "warn");
+  }
+
   window.open(`/api/qa/export/audit/${state.sessionId}`, "_blank");
   setStatus("Exporting audit report...");
 });
